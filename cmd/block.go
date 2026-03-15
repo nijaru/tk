@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"path/filepath"
-	"time"
 
 	"github.com/nijaru/tk/internal/format"
 	"github.com/nijaru/tk/internal/task"
@@ -20,45 +18,40 @@ func (c *BlockCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	blockerId, err := task.ResolveID(c.Blocker)
+	blockerID, err := task.ResolveID(c.Blocker)
 	if err != nil {
 		return err
 	}
 
-	if id == blockerId {
+	if id == blockerID {
 		return fmt.Errorf("task cannot block itself")
 	}
 
-	root := task.FindRoot()
-	t, err := task.ReadTaskFile(filepath.Join(root.TasksDir, id+".json"))
+	existing, _, err := task.GetTask(id)
 	if err != nil {
 		return err
 	}
 
-	// Check if already blocked
-	for _, b := range t.BlockedBy {
-		if b == blockerId {
-			fmt.Printf("Task %s is already blocked by %s\n", id, blockerId)
+	for _, b := range existing.BlockedBy {
+		if b == blockerID {
+			fmt.Printf("Task %s is already blocked by %s\n", id, blockerID)
 			return nil
 		}
 	}
 
-	// Cycle detection
-	if task.WouldCreateBlockCycle(id, blockerId) {
+	if task.WouldCreateBlockCycle(id, blockerID) {
 		return fmt.Errorf("would create circular dependency")
 	}
 
-	t.BlockedBy = append(t.BlockedBy, blockerId)
-	t.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	if err := task.SaveTask(t); err != nil {
+	t, err := task.AddBlocker(id, blockerID)
+	if err != nil {
 		return err
 	}
 
 	if cli.JSON {
 		fmt.Println(format.FormatJson(t))
 	} else {
-		fmt.Printf("Blocked %s by %s\n", id, blockerId)
+		fmt.Printf("Blocked %s by %s\n", id, blockerID)
 	}
 
 	return nil

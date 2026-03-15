@@ -150,15 +150,19 @@ func (t *Task) ID() string {
 	return TaskID(t.Project, t.Ref)
 }
 
-var idPattern = regexp.MustCompile(`^([a-z][a-z0-9]*)-([a-z0-9]+)$`)
+// idPattern validates the overall ID format: one or more hyphen-separated
+// lowercase alphanumeric segments. Uses strings.LastIndex to split project/ref.
+var idPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$`)
 
 // ParseID parses "project-ref" into its components.
+// Project names may contain hyphens (e.g. "my-app-a7b3" → project="my-app", ref="a7b3").
 func ParseID(id string) (project, ref string, ok bool) {
-	m := idPattern.FindStringSubmatch(strings.ToLower(id))
-	if m == nil {
+	s := strings.ToLower(id)
+	if !idPattern.MatchString(s) {
 		return "", "", false
 	}
-	return m[1], m[2], true
+	dash := strings.LastIndex(s, "-")
+	return s[:dash], s[dash+1:], true
 }
 
 const refChars = "abcdefghijklmnopqrstuvwxyz0123456789"

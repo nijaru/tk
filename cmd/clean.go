@@ -7,25 +7,28 @@ import (
 )
 
 type CleanCmd struct {
-	OlderThan int  `help:"Remove tasks completed more than N days ago" default:"0"`
+	OlderThan *int `help:"Remove tasks completed more than N days ago"`
 	Force     bool `help:"Force clean even if disabled in config"`
 }
 
 func (c *CleanCmd) Run(cli *CLI) error {
 	config := task.GetConfig()
 
-	days := c.OlderThan
-	if days == 0 {
-		if config.CleanAfter.Enabled {
-			days = config.CleanAfter.Days
-		} else if !c.Force {
-			fmt.Println("Auto-clean is disabled in config. Use --older-than N or --force to clean manually.")
-			return nil
-		}
+	var days int
+	switch {
+	case c.OlderThan != nil:
+		days = *c.OlderThan
+	case config.CleanAfter.Enabled:
+		days = config.CleanAfter.Days
+	case c.Force:
+		return fmt.Errorf("auto-clean is disabled; use --older-than N to specify a threshold")
+	default:
+		fmt.Println(
+			"Auto-clean is disabled. Use --older-than N or enable with 'tk config clean-after enable'.",
+		)
+		return nil
 	}
 
-	// Implementation of clean in storage.go
-	// Since I haven't implemented CleanTasks in storage.go yet, I'll add it.
 	deleted, err := task.CleanTasks(days)
 	if err != nil {
 		return err

@@ -284,10 +284,14 @@ func writeTaskFileExclusive(path string, task *Task) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = f.Write(data)
-	return err
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+
+	return f.Close()
 }
 
 func GetTask(id string) (*TaskWithMeta, *CleanupInfo, error) {
@@ -303,7 +307,15 @@ func GetTask(id string) (*TaskWithMeta, *CleanupInfo, error) {
 
 	cleanup := CleanTaskOrphans(task, id, root.TasksDir)
 
-	return EnrichTask(task, nil), cleanup, nil
+	// Pre-build statusMap to avoid N+1 reads in EnrichTask.
+	statusMap := make(map[string]Status, len(task.BlockedBy))
+	for _, blockerID := range task.BlockedBy {
+		if b, err := ReadTaskFile(getTaskPath(root.TasksDir, blockerID)); err == nil {
+			statusMap[blockerID] = b.Status
+		}
+	}
+
+	return EnrichTask(task, statusMap), cleanup, nil
 }
 
 func ReadTaskFile(path string) (*Task, error) {
@@ -752,7 +764,9 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 			if err := SaveTask(t); err != nil {
 				return nil, err
 			}
-			_ = os.Remove(oldPath)
+			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("remove old task file %s: %w", oldPath, err)
+			}
 		} else if modified {
 			if err := SaveTask(t); err != nil {
 				return nil, err
@@ -808,7 +822,9 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 	if err := SaveTask(task); err != nil {
 		return nil, err
 	}
-	_ = os.Remove(oldPath)
+	if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove old task file: %w", err)
+	}
 
 	res := &MoveResult{OldID: id, NewID: newID}
 
@@ -990,20 +1006,104 @@ func CleanTasks(days int) (int, error) {
 	}
 
 	now := time.Now().UTC()
-	deleted := 0
+	threshold := time.Duration(days) * 24 * time.Hour
+
+	toDelete := make(map[string]bool)
 	for _, t := range tasks {
 		if t.Status == StatusDone && t.CompletedAt != nil {
 			comp, err := time.Parse(time.RFC3339Nano, *t.CompletedAt)
-			if err == nil {
-				if now.Sub(comp).Hours() > float64(days*24) {
-					if err := DeleteTask(t.ID()); err == nil {
-						deleted++
-					}
-				}
+			if err != nil {
+				comp, err = time.Parse(time.RFC3339, *t.CompletedAt)
+			}
+			if err == nil && now.Sub(comp) > threshold {
+				toDelete[t.ID()] = true
 			}
 		}
 	}
-	return deleted, nil
+
+	for id := range toDelete {
+		_ = os.Remove(getTaskPath(root.TasksDir, id))
+	}
+
+	// Update references in surviving tasks in one pass.
+	for _, t := range tasks {
+		if toDelete[t.ID()] {
+			continue
+		}
+		modified := false
+		newBlockedBy := make([]string, 0, len(t.BlockedBy))
+		for _, b := range t.BlockedBy {
+			if toDelete[b] {
+				modified = true
+			} else {
+				newBlockedBy = append(newBlockedBy, b)
+			}
+		}
+		if modified {
+			t.BlockedBy = newBlockedBy
+		}
+		if t.Parent != nil && toDelete[*t.Parent] {
+			t.Parent = nil
+			modified = true
+		}
+		if modified {
+			_ = SaveTask(t)
+		}
+	}
+
+	return len(toDelete), nil
+}
+
+// --- Mutation helpers for block/unblock/log ---
+
+// AddBlocker appends a blocker to a task and saves it.
+func AddBlocker(id, blockerID string) (*Task, error) {
+	root := FindRoot()
+	t, err := ReadTaskFile(getTaskPath(root.TasksDir, id))
+	if err != nil {
+		return nil, err
+	}
+	t.BlockedBy = append(t.BlockedBy, blockerID)
+	t.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return t, SaveTask(t)
+}
+
+// RemoveBlocker removes a blocker from a task and saves it.
+// Returns (task, found, error). found is false if the blocker was not present.
+func RemoveBlocker(id, blockerID string) (*Task, bool, error) {
+	root := FindRoot()
+	t, err := ReadTaskFile(getTaskPath(root.TasksDir, id))
+	if err != nil {
+		return nil, false, err
+	}
+	newBlockedBy := make([]string, 0, len(t.BlockedBy))
+	found := false
+	for _, b := range t.BlockedBy {
+		if b == blockerID {
+			found = true
+		} else {
+			newBlockedBy = append(newBlockedBy, b)
+		}
+	}
+	if !found {
+		return t, false, nil
+	}
+	t.BlockedBy = newBlockedBy
+	t.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return t, true, SaveTask(t)
+}
+
+// AddLog appends a log entry to a task and saves it.
+func AddLog(id, msg string) (*Task, error) {
+	root := FindRoot()
+	t, err := ReadTaskFile(getTaskPath(root.TasksDir, id))
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	t.Logs = append(t.Logs, LogEntry{Ts: now, Msg: msg})
+	t.UpdatedAt = now
+	return t, SaveTask(t)
 }
 
 func CheckIntegrity() ([]string, error) {

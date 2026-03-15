@@ -36,25 +36,27 @@ $ tk init                               # project auto-derived from directory
 Initialized: .tasks
 
 $ tk add "Implement auth" -p 1
-myapp-a7b3
+Created task myapp-a7b3: Implement auth
 
 $ tk add "Write tests" -p 2
-myapp-x9k2
+Created task myapp-x9k2: Write tests
 
 $ tk block x9k2 a7b3                    # tests blocked by auth
+Blocked myapp-x9k2 by myapp-a7b3
+
 $ tk ready                              # what can I work on?
 ID          | PRIO | STATUS       | TITLE
 -----------------------------------------------------------------
 myapp-a7b3  | p1   | open         | Implement auth
 
 $ tk start a7b3
-Started: myapp-a7b3
+Started myapp-a7b3: Implement auth
 
 $ tk log a7b3 "Using JWT approach"
-Logged: myapp-a7b3
+Logged to myapp-a7b3: Using JWT approach
 
 $ tk done a7b3
-Completed: myapp-a7b3
+Completed myapp-a7b3: Implement auth
 
 $ tk ready                              # tests now unblocked
 ID          | PRIO | STATUS       | TITLE
@@ -131,11 +133,24 @@ tk edit a7b3 --parent -        # Clear parent
 ```bash
 tk config                                  # Show all config
 tk config project                          # Show default project
-tk config project api                      # Set default project
+tk config project set api                  # Set default project
 tk config project rename old new           # Rename project and all its tasks
 tk config alias                            # List aliases
 tk config alias web src/web                # Add alias
 tk config alias web --rm                   # Remove alias
+```
+
+## Shell Completions
+
+```bash
+# Fish
+tk completions fish > ~/.config/fish/completions/tk.fish
+
+# Bash
+tk completions bash >> ~/.bashrc
+
+# Zsh
+tk completions zsh > "${fpath[1]}/_tk"
 ```
 
 ## Priority

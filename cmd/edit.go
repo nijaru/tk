@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/nijaru/tk/internal/format"
@@ -137,5 +138,6 @@ func applySliceUpdates(current []string, updates []string) []string {
 	for s := range set {
 		res = append(res, s)
 	}
+	sort.Strings(res)
 	return res
 }

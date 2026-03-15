@@ -26,7 +26,7 @@ jobs:
         run: go build -o tk .
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Verify binary
         run: ./tk --version

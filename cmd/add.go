@@ -18,7 +18,7 @@ type AddCmd struct {
 	Assignees []string `       help:"Assignees (CSV, @me for git user)"                     short:"A" sep:","`
 	Parent    string   `       help:"Parent task ID"`
 	Estimate  *int     `       help:"Estimate (user-defined units)"`
-	Due       string   `       help:"Due date (YYYY-MM-DD or relative +Nd/+Nw/+Nm)"`
+	Due       string   `       help:"Due date (YYYY-MM-DD or relative +Nh/+Nd/+Nw/+Nm)"`
 }
 
 func (c *AddCmd) Run(cli *CLI) error {

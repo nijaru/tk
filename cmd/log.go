@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"path/filepath"
-	"time"
 
 	"github.com/nijaru/tk/internal/format"
 	"github.com/nijaru/tk/internal/task"
@@ -20,19 +18,8 @@ func (c *LogCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	root := task.FindRoot()
-	t, err := task.ReadTaskFile(filepath.Join(root.TasksDir, id+".json"))
+	t, err := task.AddLog(id, c.Msg)
 	if err != nil {
-		return err
-	}
-
-	t.Logs = append(t.Logs, task.LogEntry{
-		Ts:  time.Now().UTC().Format(time.RFC3339),
-		Msg: c.Msg,
-	})
-	t.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	if err := task.SaveTask(t); err != nil {
 		return err
 	}
 
