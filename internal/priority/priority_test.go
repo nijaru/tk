@@ -3,7 +3,7 @@ package priority
 import (
 	"testing"
 
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/task"
 	"github.com/stretchr/testify/assert"
 )
 

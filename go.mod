@@ -1,4 +1,4 @@
-module github.com/nijaru/tk-go
+module github.com/nijaru/tk
 
 go 1.26.1
 

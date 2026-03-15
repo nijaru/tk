@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nijaru/tk-go/internal/timeutil"
+	"github.com/nijaru/tk/internal/timeutil"
 )
 
 // --- Path Utilities ---

@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/task"
 )
 
 type RmCmd struct {

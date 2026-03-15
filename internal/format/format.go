@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"github.com/nijaru/tk-go/internal/priority"
-	"github.com/nijaru/tk-go/internal/task"
-	"github.com/nijaru/tk-go/internal/timeutil"
+	"github.com/nijaru/tk/internal/priority"
+	"github.com/nijaru/tk/internal/task"
+	"github.com/nijaru/tk/internal/timeutil"
 )
 
 // Colors

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/nijaru/tk-go/cmd"
+	"github.com/nijaru/tk/cmd"
 )
 
 func main() {

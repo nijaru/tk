@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/task"
 )
 
 // Parse parses priority from number (0-4), prefixed (p0-p4), or named form.

@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/nijaru/tk-go/internal/format"
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/format"
+	"github.com/nijaru/tk/internal/task"
 )
 
 type ReopenCmd struct {

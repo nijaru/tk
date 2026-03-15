@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"github.com/alecthomas/kong"
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/task"
 )
 
 // CLI is the root Kong command struct.

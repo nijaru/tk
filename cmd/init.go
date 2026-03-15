@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nijaru/tk-go/internal/task"
+	"github.com/nijaru/tk/internal/task"
 )
 
 type InitCmd struct {

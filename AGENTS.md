@@ -57,4 +57,4 @@ Commands that must pass before any milestone:
 ## Distribution Plan
 
 - **Homebrew**: Push to `nijaru/homebrew-tap` (using Makefile/GoReleaser local test first)
-- **Go Install**: `go install github.com/nijaru/tk-go@latest`
+- **Go Install**: `go install github.com/nijaru/tk@latest`
