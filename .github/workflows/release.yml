@@ -117,7 +117,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_UPDATE_TOKEN: ${{ secrets.TAP_UPDATE_TOKEN }}
 
-      - name: Publish npm packages
+      - name: Publish npm platform packages
         if: ${{ !inputs.dry_run }}
         shell: bash
         env:
@@ -172,7 +172,15 @@ jobs:
           win32-x64	tk_windows_amd64.zip	tk.exe
           PLATFORMS
 
-          # Publish main wrapper package @nijaru/tk
+      - name: Publish @nijaru/tk
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Publish main wrapper package via npm trusted publishing (OIDC — no token needed)
           MAIN_DIR="dist/npm-main"
           mkdir -p "${MAIN_DIR}/bin"
           cp npm/main/bin/tk.js "${MAIN_DIR}/bin/"
