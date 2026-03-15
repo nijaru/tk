@@ -641,8 +641,9 @@ func ResolveID(input string) (string, error) {
 		// Match against full ID or just the part after the project prefix
 		if strings.HasPrefix(strings.ToLower(id), lowerInput) {
 			matches = append(matches, id)
-		} else if parts := strings.Split(id, "-"); len(parts) == 2 {
-			if strings.HasPrefix(strings.ToLower(parts[1]), lowerInput) {
+		} else if dash := strings.LastIndex(id, "-"); dash != -1 {
+			ref := id[dash+1:]
+			if strings.HasPrefix(strings.ToLower(ref), lowerInput) {
 				matches = append(matches, id)
 			}
 		}

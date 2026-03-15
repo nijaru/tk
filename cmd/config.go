@@ -8,12 +8,15 @@ import (
 )
 
 type ConfigCmd struct {
+	Show     ConfigShowCmd     `cmd:"" help:"Show configuration" default:"1"`
 	Project  ConfigProjectCmd  `cmd:"" help:"Get or set the default project"`
 	Alias    ConfigAliasCmd    `cmd:"" help:"Manage directory aliases for -C"`
 	Defaults ConfigDefaultsCmd `cmd:"" help:"Show or set default values"`
 }
 
-func (c *ConfigCmd) Run(cli *CLI) error {
+type ConfigShowCmd struct{}
+
+func (c *ConfigShowCmd) Run(cli *CLI) error {
 	config := task.GetConfig()
 	if cli.JSON {
 		fmt.Println(format.FormatJson(config))
@@ -24,24 +27,31 @@ func (c *ConfigCmd) Run(cli *CLI) error {
 }
 
 type ConfigProjectCmd struct {
-	Name   string `arg:"" optional:"" help:"Project name to set"`
-	Rename ConfigProjectRenameCmd `cmd:"" help:"Rename: tk config project rename <old> <new>"`
+	Show   ConfigProjectShowCmd   `cmd:"" help:"Show default project" default:"1"`
+	Set    ConfigProjectSetCmd    `cmd:"" help:"Set default project"`
+	Rename ConfigProjectRenameCmd `cmd:"" help:"Rename project and all its tasks"`
 }
 
-func (c *ConfigProjectCmd) Run(cli *CLI) error {
-	if c.Name != "" {
-		config, err := task.UpdateConfig(func(cfg *task.Config) {
-			cfg.Project = c.Name
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Default project set to %q\n", config.Project)
-		return nil
-	}
+type ConfigProjectShowCmd struct{}
 
+func (c *ConfigProjectShowCmd) Run(cli *CLI) error {
 	config := task.GetConfig()
 	fmt.Printf("Default project: %s\n", config.Project)
+	return nil
+}
+
+type ConfigProjectSetCmd struct {
+	Name string `arg:"" help:"Project name to set"`
+}
+
+func (c *ConfigProjectSetCmd) Run(cli *CLI) error {
+	config, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.Project = c.Name
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Default project set to %q\n", config.Project)
 	return nil
 }
 
