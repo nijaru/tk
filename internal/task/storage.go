@@ -43,8 +43,27 @@ func atomicWrite(path string, content []byte) error {
 	}
 	tempPath := fmt.Sprintf("%s.tmp.%s", path, ref)
 
-	if err := os.WriteFile(tempPath, content, 0o644); err != nil {
+	f, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open temp file: %w", err)
+	}
+	
+	_, err = f.Write(content)
+	if err != nil {
+		f.Close()
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("write temp file: %w", err)
+	}
+
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close temp file: %w", err)
 	}
 
 	if err := os.Rename(tempPath, path); err != nil {
@@ -194,7 +213,7 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 		project = config.Project
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Generate random ref with collision detection
 	const maxRetries = 10
@@ -473,7 +492,7 @@ func UpdateTaskStatus(id string, status Status) (*TaskWithMeta, error) {
 		return nil, err
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	task.Status = status
 	task.UpdatedAt = now
 	if status == StatusDone {
@@ -512,7 +531,7 @@ func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
 		return nil, err
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	modified := false
 
 	if updates.Title != nil {
@@ -783,7 +802,7 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 	}
 
 	task.Project = newProject
-	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	
 	if err := SaveTask(task); err != nil {
 		return nil, err
@@ -933,7 +952,7 @@ func CleanTaskOrphans(task *Task, expectedID, tasksDir string) *CleanupInfo {
 	}
 
 	if modified {
-		task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		task.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		_ = SaveTask(task)
 	}
 
@@ -972,7 +991,7 @@ func CleanTasks(days int) (int, error) {
 	deleted := 0
 	for _, t := range tasks {
 		if t.Status == StatusDone && t.CompletedAt != nil {
-			comp, err := time.Parse(time.RFC3339, *t.CompletedAt)
+			comp, err := time.Parse(time.RFC3339Nano, *t.CompletedAt)
 			if err == nil {
 				if now.Sub(comp).Hours() > float64(days*24) {
 					if err := DeleteTask(t.ID()); err == nil {

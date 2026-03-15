@@ -48,63 +48,11 @@ func (c *EditCmd) Run(cli *CLI) error {
 	}
 
 	if len(c.Labels) > 0 {
-		current := make(map[string]bool)
-		for _, l := range t.Labels {
-			current[l] = true
-		}
-
-		replaced := false
-		for _, l := range c.Labels {
-			if strings.HasPrefix(l, "+") {
-				current[l[1:]] = true
-			} else if strings.HasPrefix(l, "-") {
-				delete(current, l[1:])
-			} else {
-				// If no prefix, we assume we want to replace the whole list
-				// But original tk logic might be different. 
-				// The prompt says replacement if no prefix.
-				if !replaced {
-					current = make(map[string]bool)
-					replaced = true
-				}
-				current[l] = true
-			}
-		}
-
-		newList := make([]string, 0, len(current))
-		for l := range current {
-			newList = append(newList, l)
-		}
-		updates.Labels = newList
+		updates.Labels = applySliceUpdates(t.Labels, c.Labels)
 	}
 
 	if len(c.Assignees) > 0 {
-		// Similar logic for assignees
-		current := make(map[string]bool)
-		for _, a := range t.Assignees {
-			current[a] = true
-		}
-
-		replaced := false
-		for _, a := range c.Assignees {
-			if strings.HasPrefix(a, "+") {
-				current[a[1:]] = true
-			} else if strings.HasPrefix(a, "-") {
-				delete(current, a[1:])
-			} else {
-				if !replaced {
-					current = make(map[string]bool)
-					replaced = true
-				}
-				current[a] = true
-			}
-		}
-
-		newList := make([]string, 0, len(current))
-		for a := range current {
-			newList = append(newList, a)
-		}
-		updates.Assignees = newList
+		updates.Assignees = applySliceUpdates(t.Assignees, c.Assignees)
 	}
 
 	if c.Due != "" {
@@ -162,4 +110,32 @@ func (c *EditCmd) Run(cli *CLI) error {
 	}
 
 	return nil
+}
+
+func applySliceUpdates(current []string, updates []string) []string {
+	set := make(map[string]bool)
+	for _, s := range current {
+		set[s] = true
+	}
+
+	replaced := false
+	for _, s := range updates {
+		if strings.HasPrefix(s, "+") {
+			set[s[1:]] = true
+		} else if strings.HasPrefix(s, "-") {
+			delete(set, s[1:])
+		} else {
+			if !replaced {
+				set = make(map[string]bool)
+				replaced = true
+			}
+			set[s] = true
+		}
+	}
+
+	res := make([]string, 0, len(set))
+	for s := range set {
+		res = append(res, s)
+	}
+	return res
 }

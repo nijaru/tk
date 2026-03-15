@@ -10,8 +10,9 @@ import (
 type ConfigCmd struct {
 	Show     ConfigShowCmd     `cmd:"" help:"Show configuration" default:"1"`
 	Project  ConfigProjectCmd  `cmd:"" help:"Get or set the default project"`
-	Alias    ConfigAliasCmd    `cmd:"" help:"Manage directory aliases for -C"`
-	Defaults ConfigDefaultsCmd `cmd:"" help:"Show or set default values"`
+	Alias    ConfigAliasCmd      `cmd:"" help:"Manage directory aliases for -C"`
+	Defaults ConfigDefaultsCmd   `cmd:"" help:"Show or set default values"`
+	Clean    ConfigCleanAfterCmd `cmd:"" help:"Configure auto-cleanup" name:"clean-after"`
 }
 
 type ConfigShowCmd struct{}
@@ -124,18 +125,106 @@ func (c *ConfigAliasCmd) Run(cli *CLI) error {
 }
 
 type ConfigDefaultsCmd struct {
-	// Not adding flags yet, keep it simple show-only or add a few
+	Show      ConfigDefaultsShowCmd      `cmd:"" help:"Show default values" default:"1"`
+	Priority  ConfigDefaultsPriorityCmd  `cmd:"" help:"Set default priority"`
+	Labels    ConfigDefaultsLabelsCmd    `cmd:"" help:"Set default labels"`
+	Assignees ConfigDefaultsAssigneesCmd `cmd:"" help:"Set default assignees"`
 }
 
-func (c *ConfigDefaultsCmd) Run(cli *CLI) error {
+type ConfigDefaultsShowCmd struct{}
+
+func (c *ConfigDefaultsShowCmd) Run(cli *CLI) error {
 	config := task.GetConfig()
 	fmt.Println("Defaults:")
 	fmt.Printf("  Priority:  %d\n", config.Defaults.Priority)
-	if len(config.Defaults.Labels) > 0 {
-		fmt.Printf("  Labels:    %v\n", config.Defaults.Labels)
-	}
-	if len(config.Defaults.Assignees) > 0 {
-		fmt.Printf("  Assignees: %v\n", config.Defaults.Assignees)
-	}
+	fmt.Printf("  Labels:    %v\n", config.Defaults.Labels)
+	fmt.Printf("  Assignees: %v\n", config.Defaults.Assignees)
 	return nil
+}
+
+type ConfigDefaultsPriorityCmd struct {
+	Level int `arg:"" help:"Default priority level (0-4)"`
+}
+
+func (c *ConfigDefaultsPriorityCmd) Run(cli *CLI) error {
+	if c.Level < 0 || c.Level > 4 {
+		return fmt.Errorf("priority must be 0-4")
+	}
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.Defaults.Priority = task.Priority(c.Level)
+	})
+	return err
+}
+
+type ConfigDefaultsLabelsCmd struct {
+	Labels []string `arg:"" help:"Default labels (CSV)" sep:","`
+}
+
+func (c *ConfigDefaultsLabelsCmd) Run(cli *CLI) error {
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.Defaults.Labels = c.Labels
+	})
+	return err
+}
+
+type ConfigDefaultsAssigneesCmd struct {
+	Assignees []string `arg:"" help:"Default assignees (CSV)" sep:","`
+}
+
+func (c *ConfigDefaultsAssigneesCmd) Run(cli *CLI) error {
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.Defaults.Assignees = c.Assignees
+	})
+	return err
+}
+
+type ConfigCleanAfterCmd struct {
+	Show    ConfigCleanAfterShowCmd    `cmd:"" help:"Show clean-after config" default:"1"`
+	Enable  ConfigCleanAfterEnableCmd  `cmd:"" help:"Enable auto-clean"`
+	Disable ConfigCleanAfterDisableCmd `cmd:"" help:"Disable auto-clean"`
+	Days    ConfigCleanAfterDaysCmd    `cmd:"" help:"Set clean-after days"`
+}
+
+type ConfigCleanAfterShowCmd struct{}
+
+func (c *ConfigCleanAfterShowCmd) Run(cli *CLI) error {
+	config := task.GetConfig()
+	status := "disabled"
+	if config.CleanAfter.Enabled {
+		status = "enabled"
+	}
+	fmt.Printf("Clean After: %s (%d days)\n", status, config.CleanAfter.Days)
+	return nil
+}
+
+type ConfigCleanAfterEnableCmd struct{}
+
+func (c *ConfigCleanAfterEnableCmd) Run(cli *CLI) error {
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.CleanAfter.Enabled = true
+	})
+	return err
+}
+
+type ConfigCleanAfterDisableCmd struct{}
+
+func (c *ConfigCleanAfterDisableCmd) Run(cli *CLI) error {
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.CleanAfter.Enabled = false
+	})
+	return err
+}
+
+type ConfigCleanAfterDaysCmd struct {
+	Days int `arg:"" help:"Days after which to clean completed tasks"`
+}
+
+func (c *ConfigCleanAfterDaysCmd) Run(cli *CLI) error {
+	if c.Days < 0 {
+		return fmt.Errorf("days must be >= 0")
+	}
+	_, err := task.UpdateConfig(func(cfg *task.Config) {
+		cfg.CleanAfter.Days = c.Days
+	})
+	return err
 }

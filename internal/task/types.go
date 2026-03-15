@@ -137,7 +137,12 @@ var DefaultConfig = Config{
 
 // TaskID returns the full task ID from project and ref.
 func TaskID(project, ref string) string {
-	return project + "-" + ref
+	var b strings.Builder
+	b.Grow(len(project) + 1 + len(ref))
+	b.WriteString(project)
+	b.WriteByte('-')
+	b.WriteString(ref)
+	return b.String()
 }
 
 // ID returns the full task ID.
