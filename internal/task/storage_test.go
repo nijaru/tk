@@ -12,10 +12,10 @@ import (
 func setupTestDir(t *testing.T) string {
 	tmp, err := os.MkdirTemp("", "tk-test-*")
 	require.NoError(t, err)
-	
-	err = os.Mkdir(filepath.Join(tmp, ".tasks"), 0755)
+
+	err = os.Mkdir(filepath.Join(tmp, ".tasks"), 0o755)
 	require.NoError(t, err)
-	
+
 	SetWorkingDir(tmp)
 	return tmp
 }
@@ -68,7 +68,7 @@ func TestCycleDetection(t *testing.T) {
 		// A blocks B, B blocks C, C blocks A (invalid)
 		// We use WouldCreateBlockCycle(taskId, blockerId)
 		// taskId is the one THAT WILL BE BLOCKED BY blockerId.
-		
+
 		// Set up A -> B -> C
 		taskB, _, _ := GetTask(t2.ID)
 		taskB.BlockedBy = append(taskB.BlockedBy, t1.ID)
@@ -85,7 +85,7 @@ func TestCycleDetection(t *testing.T) {
 
 	t.Run("Parent Cycle", func(t *testing.T) {
 		// A is parent of B, B is parent of C, C is parent of A (invalid)
-		
+
 		taskB, _, _ := GetTask(t2.ID)
 		taskB.Parent = &t1.ID
 		SaveTask(&taskB.Task)
@@ -104,7 +104,7 @@ func TestMoveAndRename(t *testing.T) {
 
 	t1, _ := CreateTask(CreateTaskOptions{Title: "T1", Project: "p1"})
 	t2, _ := CreateTask(CreateTaskOptions{Title: "T2", Project: "p1"})
-	
+
 	// t2 blocked by t1
 	task2, _, _ := GetTask(t2.ID)
 	task2.BlockedBy = []string{t1.ID}
@@ -135,7 +135,7 @@ func TestMoveAndRename(t *testing.T) {
 		assert.Equal(t, oldID, res.OldID)
 		assert.Equal(t, TaskID("p3", t1.Ref), res.NewID)
 		assert.Equal(t, 1, res.ReferencesUpdated)
-		
+
 		// Check that t2 (in p2) now blocks on p3-ref
 		t2ID := TaskID("p2", t2.Ref)
 		task2, _, _ := GetTask(t2ID)

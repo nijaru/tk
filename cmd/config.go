@@ -8,11 +8,11 @@ import (
 )
 
 type ConfigCmd struct {
-	Show     ConfigShowCmd     `cmd:"" help:"Show configuration" default:"1"`
-	Project  ConfigProjectCmd  `cmd:"" help:"Get or set the default project"`
+	Show     ConfigShowCmd       `cmd:"" help:"Show configuration"              default:"1"`
+	Project  ConfigProjectCmd    `cmd:"" help:"Get or set the default project"`
 	Alias    ConfigAliasCmd      `cmd:"" help:"Manage directory aliases for -C"`
 	Defaults ConfigDefaultsCmd   `cmd:"" help:"Show or set default values"`
-	Clean    ConfigCleanAfterCmd `cmd:"" help:"Configure auto-cleanup" name:"clean-after"`
+	Clean    ConfigCleanAfterCmd `cmd:"" help:"Configure auto-cleanup"                      name:"clean-after"`
 }
 
 type ConfigShowCmd struct{}
@@ -28,7 +28,7 @@ func (c *ConfigShowCmd) Run(cli *CLI) error {
 }
 
 type ConfigProjectCmd struct {
-	Show   ConfigProjectShowCmd   `cmd:"" help:"Show default project" default:"1"`
+	Show   ConfigProjectShowCmd   `cmd:"" help:"Show default project"             default:"1"`
 	Set    ConfigProjectSetCmd    `cmd:"" help:"Set default project"`
 	Rename ConfigProjectRenameCmd `cmd:"" help:"Rename project and all its tasks"`
 }
@@ -125,7 +125,7 @@ func (c *ConfigAliasCmd) Run(cli *CLI) error {
 }
 
 type ConfigDefaultsCmd struct {
-	Show      ConfigDefaultsShowCmd      `cmd:"" help:"Show default values" default:"1"`
+	Show      ConfigDefaultsShowCmd      `cmd:"" help:"Show default values"   default:"1"`
 	Priority  ConfigDefaultsPriorityCmd  `cmd:"" help:"Set default priority"`
 	Labels    ConfigDefaultsLabelsCmd    `cmd:"" help:"Set default labels"`
 	Assignees ConfigDefaultsAssigneesCmd `cmd:"" help:"Set default assignees"`

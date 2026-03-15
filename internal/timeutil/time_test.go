@@ -37,7 +37,7 @@ func TestParseDueDate(t *testing.T) {
 func TestIsOverdue(t *testing.T) {
 	past := "2000-01-01"
 	future := "2100-01-01"
-	
+
 	assert.True(t, IsOverdue(&past, false))
 	assert.False(t, IsOverdue(&past, true)) // Completed
 	assert.False(t, IsOverdue(&future, false))
@@ -47,11 +47,11 @@ func TestIsOverdue(t *testing.T) {
 func TestDaysUntilDue(t *testing.T) {
 	future := time.Now().AddDate(0, 0, 5)
 	futureStr := FormatLocalDate(future)
-	
+
 	days := DaysUntilDue(&futureStr, false)
 	assert.NotNil(t, days)
 	assert.Equal(t, 5, *days)
-	
+
 	past := "2000-01-01"
 	assert.Nil(t, DaysUntilDue(&past, false))
 	assert.Nil(t, DaysUntilDue(nil, false))
@@ -60,10 +60,10 @@ func TestDaysUntilDue(t *testing.T) {
 func TestFormatRelative(t *testing.T) {
 	now := time.Now().Format(time.RFC3339)
 	assert.Equal(t, "now", FormatRelative(now))
-	
+
 	h2 := time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
 	assert.Equal(t, "2h", FormatRelative(h2))
-	
+
 	d3 := time.Now().AddDate(0, 0, -3).Format(time.RFC3339)
 	assert.Equal(t, "3d", FormatRelative(d3))
 }

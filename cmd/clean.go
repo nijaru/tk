@@ -13,7 +13,7 @@ type CleanCmd struct {
 
 func (c *CleanCmd) Run(cli *CLI) error {
 	config := task.GetConfig()
-	
+
 	days := c.OlderThan
 	if days == 0 {
 		if config.CleanAfter.Enabled {

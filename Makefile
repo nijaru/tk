@@ -1,7 +1,16 @@
 BINARY_NAME=tk
 VERSION?=dev
 
-.PHONY: build test clean install release-test
+.PHONY: fmt build test clean install release-test
+
+fmt:
+	@files="$$(git ls-files '*.go')"; \
+	if [ -z "$$files" ]; then \
+		echo "no tracked Go files to format"; \
+	else \
+		goimports -w $$files; \
+		golines --base-formatter gofumpt -w $$files; \
+	fi
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY_NAME) .

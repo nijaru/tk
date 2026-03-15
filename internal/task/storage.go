@@ -47,7 +47,7 @@ func atomicWrite(path string, content []byte) error {
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
-	
+
 	_, err = f.Write(content)
 	if err != nil {
 		f.Close()
@@ -150,7 +150,7 @@ func compareTasks(a, b *Task) bool {
 func GetConfig() Config {
 	root := FindRoot()
 	configPath := getConfigPath(root.TasksDir)
-	
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return DefaultConfig
@@ -169,7 +169,7 @@ func SaveConfig(config Config) error {
 	if err != nil {
 		return err
 	}
-	
+
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -260,7 +260,7 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 		}
 
 		path := getTaskPath(tasksDir, id)
-		
+
 		err = writeTaskFileExclusive(path, &task)
 		if err == nil {
 			return EnrichTask(&task, nil), nil
@@ -302,7 +302,7 @@ func GetTask(id string) (*TaskWithMeta, *CleanupInfo, error) {
 	}
 
 	cleanup := CleanTaskOrphans(task, id, root.TasksDir)
-	
+
 	return EnrichTask(task, nil), cleanup, nil
 }
 
@@ -325,7 +325,7 @@ func SaveTask(task *Task) error {
 	if !root.Exists {
 		return &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
 	}
-	
+
 	data, err := json.MarshalIndent(task, "", "  ")
 	if err != nil {
 		return err
@@ -470,7 +470,8 @@ func GetAllTasks(tasksDir string) ([]*Task, error) {
 
 	var tasks []*Task
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || entry.Name() == "config.json" {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") ||
+			entry.Name() == "config.json" {
 			continue
 		}
 
@@ -592,7 +593,7 @@ func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
 func DeleteTask(id string) error {
 	root := FindRoot()
 	path := getTaskPath(root.TasksDir, id)
-	
+
 	if err := os.Remove(path); err != nil {
 		return err
 	}
@@ -604,7 +605,7 @@ func DeleteTask(id string) error {
 
 	for _, t := range allTasks {
 		modified := false
-		
+
 		newBlockedBy := make([]string, 0, len(t.BlockedBy))
 		for _, b := range t.BlockedBy {
 			if b != id {
@@ -649,14 +650,14 @@ func ResolveID(input string) (string, error) {
 
 	var matches []string
 	lowerInput := strings.ToLower(input)
-	
+
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".json") || name == "config.json" {
 			continue
 		}
 		id := strings.TrimSuffix(name, ".json")
-		
+
 		// Match against full ID or just the part after the project prefix
 		if strings.HasPrefix(strings.ToLower(id), lowerInput) {
 			matches = append(matches, id)
@@ -723,10 +724,10 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 	}
 
 	res := &RenameResult{Renamed: make([]string, 0, len(toRename))}
-	
+
 	for _, t := range allTasks {
 		modified := false
-		
+
 		for i, b := range t.BlockedBy {
 			if newID, ok := idMap[b]; ok {
 				t.BlockedBy[i] = newID
@@ -747,7 +748,7 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 			oldPath := getTaskPath(root.TasksDir, t.ID())
 			t.Project = newName
 			res.Renamed = append(res.Renamed, t.ID())
-			
+
 			if err := SaveTask(t); err != nil {
 				return nil, err
 			}
@@ -803,14 +804,14 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 
 	task.Project = newProject
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	
+
 	if err := SaveTask(task); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(oldPath)
 
 	res := &MoveResult{OldID: id, NewID: newID}
-	
+
 	allTasks, err := GetAllTasks(root.TasksDir)
 	if err == nil {
 		for _, t := range allTasks {
@@ -956,7 +957,8 @@ func CleanTaskOrphans(task *Task, expectedID, tasksDir string) *CleanupInfo {
 		_ = SaveTask(task)
 	}
 
-	if len(cleanup.OrphanedBlockers) == 0 && cleanup.OrphanedParent == "" && cleanup.IDMismatch == nil {
+	if len(cleanup.OrphanedBlockers) == 0 && cleanup.OrphanedParent == "" &&
+		cleanup.IDMismatch == nil {
 		return nil
 	}
 	return cleanup

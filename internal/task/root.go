@@ -28,7 +28,7 @@ func SetWorkingDir(dir string) error {
 	// But FindRoot depends on workingDir.
 	// We'll set the provisional working dir, then check for aliases.
 	workingDir = abs
-	
+
 	root := FindRoot()
 	if root.Exists {
 		configPath := filepath.Join(root.TasksDir, "config.json")

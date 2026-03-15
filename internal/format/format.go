@@ -73,7 +73,7 @@ func truncate(text string, maxLen int) string {
 func FormatTaskRow(t *task.TaskWithMeta) string {
 	id := fmt.Sprintf("%-11s", formatId(t.ID, 11))
 	prio := fmt.Sprintf("%-4s", priority.Format(t.Priority))
-	
+
 	isOverdue := t.IsOverdue
 	dueSoon := !isOverdue && t.DaysUntilDue != nil && *t.DaysUntilDue <= timeutil.DueSoonThreshold
 
@@ -92,7 +92,7 @@ func FormatTaskRow(t *task.TaskWithMeta) string {
 		} else if dueSoon {
 			sc = DueSoonColor
 		}
-		
+
 		tc := color.New()
 		if t.Status == task.StatusDone {
 			tc = color.New(color.Faint)
@@ -130,7 +130,7 @@ func FormatTaskList(tasks []*task.TaskWithMeta, emptyHint string) string {
 
 	header := "ID          | PRIO | STATUS       | TITLE"
 	divider := strings.Repeat("-", 65)
-	
+
 	var rows []string
 	rows = append(rows, header, divider)
 	for _, t := range tasks {
@@ -159,7 +159,10 @@ func FormatTaskDetail(t *task.TaskWithMeta) string {
 	lines = append(lines, fmt.Sprintf("ID:          %s", t.ID))
 	lines.pushIfNonEmpty("Title:       ", t.Title)
 	lines = append(lines, fmt.Sprintf("Status:      %s", sc.Sprint(string(t.Status))))
-	lines = append(lines, fmt.Sprintf("Priority:    %s", pc.Sprint(priority.FormatName(t.Priority))))
+	lines = append(
+		lines,
+		fmt.Sprintf("Priority:    %s", pc.Sprint(priority.FormatName(t.Priority))),
+	)
 
 	if t.Description != nil {
 		lines = append(lines, fmt.Sprintf("Description: %s", *t.Description))
@@ -207,7 +210,10 @@ func FormatTaskDetail(t *task.TaskWithMeta) string {
 		if t.BlockedByIncomplete {
 			status = " (blocked)"
 		}
-		lines = append(lines, fmt.Sprintf("Blockers:    %s%s", strings.Join(t.BlockedBy, ", "), status))
+		lines = append(
+			lines,
+			fmt.Sprintf("Blockers:    %s%s", strings.Join(t.BlockedBy, ", "), status),
+		)
 	}
 
 	if len(t.Logs) > 0 {
@@ -241,7 +247,7 @@ func FormatConfig(config task.Config) string {
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Version:     %d", config.Version))
 	lines = append(lines, fmt.Sprintf("Project:     %s", config.Project))
-	
+
 	if config.CleanAfter.Enabled {
 		lines = append(lines, fmt.Sprintf("Clean After: %d days", config.CleanAfter.Days))
 	} else {
@@ -249,12 +255,21 @@ func FormatConfig(config task.Config) string {
 	}
 
 	if len(config.Defaults.Labels) > 0 {
-		lines = append(lines, fmt.Sprintf("Def Labels:  %s", strings.Join(config.Defaults.Labels, ", ")))
+		lines = append(
+			lines,
+			fmt.Sprintf("Def Labels:  %s", strings.Join(config.Defaults.Labels, ", ")),
+		)
 	}
 	if len(config.Defaults.Assignees) > 0 {
-		lines = append(lines, fmt.Sprintf("Def Assigns: %s", strings.Join(config.Defaults.Assignees, ", ")))
+		lines = append(
+			lines,
+			fmt.Sprintf("Def Assigns: %s", strings.Join(config.Defaults.Assignees, ", ")),
+		)
 	}
-	lines = append(lines, fmt.Sprintf("Def Prio:    %s", priority.FormatName(config.Defaults.Priority)))
+	lines = append(
+		lines,
+		fmt.Sprintf("Def Prio:    %s", priority.FormatName(config.Defaults.Priority)),
+	)
 
 	if len(config.Aliases) > 0 {
 		lines = append(lines, "", "Aliases:")
