@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,12 +16,36 @@ const (
 var workingDir string
 
 // SetWorkingDir sets the global working directory override.
+// If the provided dir matches an alias in the project config, it resolves to the alias path.
 func SetWorkingDir(dir string) error {
+	// First, try absolute path normally
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return fmt.Errorf("resolve working dir: %w", err)
 	}
+
+	// We can't easily check aliases without finding the root first.
+	// But FindRoot depends on workingDir.
+	// We'll set the provisional working dir, then check for aliases.
 	workingDir = abs
+	
+	root := FindRoot()
+	if root.Exists {
+		configPath := filepath.Join(root.TasksDir, "config.json")
+		data, err := os.ReadFile(configPath)
+		if err == nil {
+			var config struct {
+				Aliases map[string]string `json:"aliases"`
+			}
+			if err := json.Unmarshal(data, &config); err == nil {
+				if aliasPath, ok := config.Aliases[dir]; ok {
+					// Alias path is relative to project root
+					workingDir = filepath.Join(root.Root, aliasPath)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

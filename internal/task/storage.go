@@ -492,12 +492,16 @@ func UpdateTaskStatus(id string, status Status) (*TaskWithMeta, error) {
 type UpdateTaskOptions struct {
 	Title       *string
 	Description *string
+	ClearDesc   bool
 	Priority    *Priority
 	Labels      []string
 	Assignees   []string
 	Parent      *string
+	ClearParent bool
 	Estimate    *int
+	ClearEst    bool
 	DueDate     *string
+	ClearDue    bool
 }
 
 func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
@@ -515,7 +519,10 @@ func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
 		task.Title = *updates.Title
 		modified = true
 	}
-	if updates.Description != nil {
+	if updates.ClearDesc {
+		task.Description = nil
+		modified = true
+	} else if updates.Description != nil {
 		task.Description = updates.Description
 		modified = true
 	}
@@ -531,15 +538,24 @@ func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
 		task.Assignees = updates.Assignees
 		modified = true
 	}
-	if updates.Parent != nil {
+	if updates.ClearParent {
+		task.Parent = nil
+		modified = true
+	} else if updates.Parent != nil {
 		task.Parent = updates.Parent
 		modified = true
 	}
-	if updates.Estimate != nil {
+	if updates.ClearEst {
+		task.Estimate = nil
+		modified = true
+	} else if updates.Estimate != nil {
 		task.Estimate = updates.Estimate
 		modified = true
 	}
-	if updates.DueDate != nil {
+	if updates.ClearDue {
+		task.DueDate = nil
+		modified = true
+	} else if updates.DueDate != nil {
 		task.DueDate = updates.DueDate
 		modified = true
 	}
@@ -942,4 +958,56 @@ func (c *CleanupInfo) Message(id string) string {
 		parts = append(parts, fmt.Sprintf("ID mismatch (was %s)", c.IDMismatch.Was))
 	}
 	return fmt.Sprintf("(cleaned %s from %s)", strings.Join(parts, ", "), id)
+}
+
+func CleanTasks(days int) (int, error) {
+	root := FindRoot()
+	tasks, err := GetAllTasks(root.TasksDir)
+	if err != nil {
+		return 0, err
+	}
+
+	now := time.Now().UTC()
+	deleted := 0
+	for _, t := range tasks {
+		if t.Status == StatusDone && t.CompletedAt != nil {
+			comp, err := time.Parse(time.RFC3339, *t.CompletedAt)
+			if err == nil {
+				if now.Sub(comp).Hours() > float64(days*24) {
+					if err := DeleteTask(t.ID()); err == nil {
+						deleted++
+					}
+				}
+			}
+		}
+	}
+	return deleted, nil
+}
+
+func CheckIntegrity() ([]string, error) {
+	root := FindRoot()
+	tasks, err := GetAllTasks(root.TasksDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var issues []string
+	idMap := make(map[string]bool)
+	for _, t := range tasks {
+		idMap[t.ID()] = true
+	}
+
+	for _, t := range tasks {
+		id := t.ID()
+		for _, b := range t.BlockedBy {
+			if !idMap[b] {
+				issues = append(issues, fmt.Sprintf("Task %s is blocked by missing task %s", id, b))
+			}
+		}
+		if t.Parent != nil && !idMap[*t.Parent] {
+			issues = append(issues, fmt.Sprintf("Task %s has missing parent %s", id, *t.Parent))
+		}
+	}
+
+	return issues, nil
 }
