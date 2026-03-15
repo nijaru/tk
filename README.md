@@ -6,9 +6,17 @@ Same UX and `.tasks/` storage format as the original, compiled to a single binar
 
 ## Status
 
-Work in progress.
+**Complete**. Feature parity with the TypeScript version achieved.
 
 ## Install
+
+### Homebrew (Recommended for Mac/Linux)
+
+```bash
+brew install nijaru/tap/tk
+```
+
+### Go
 
 ```bash
 go install github.com/nijaru/tk-go@latest

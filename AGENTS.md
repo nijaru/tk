@@ -1,57 +1,60 @@
 # tk-go
 
-Go rewrite of [tk](https://github.com/nijaru/tk) — minimal task tracker CLI.
+Go port of [tk](https://github.com/nijaru/tk) — minimal task tracker CLI.
+Feature-complete, single-binary, no-dependency successor.
 
-## Goal
+## Project Structure
 
-Feature-complete Go port. Same UX, same `.tasks/` storage format, same JSON schema. Ships as a single compiled binary with no runtime dependency.
+| Directory  | Purpose                                                              |
+| ---------- | -------------------------------------------------------------------- |
+| `cmd/`     | CLI commands (Kong), subcommands, and flags                          |
+| `internal/`| Core logic (not for external use)                                    |
+| `  task/`  | Storage (atomic write), CRUD, Root discovery, ID resolution         |
+| `  format/`| Table/JSON output, color handling, truncation                        |
+| `  priority/`| Priority parsing (0-4, none-low)                                   |
+| `  timeutil/`| Relative dates (+7d), overdue logic, RFC3339Nano precision         |
+| `ai/`      | Local-only AI context — excluded via `.git/info/exclude`             |
+| `.tasks/`  | Local-only task state — excluded via `.git/info/exclude`             |
 
-## Source Reference
+## AI Context Organization
 
-Original TypeScript implementation is at `../tk/` (or open both as a Zed workspace folder). Use it as the canonical reference for behavior, storage schema, and command semantics.
+**Purpose:** Persistent memory for AI assistants without polluting git history.
+**Reference original source:** `../tk/` is the canonical reference for behavior and schema.
 
-## Stack
+**Session files** (local only):
+- `ai/STATUS.md` — Current state, findings, verification status (Read FIRST)
+- `ai/DESIGN.md` — Architecture decisions, Go vs TS differences
+- `ai/DECISIONS.md` — Append-only design log
 
-- **Language:** Go (latest stable)
-- **CLI framework:** [cobra](https://github.com/spf13/cobra) or stdlib `flag` — decide in design phase
-- **Formatter:** `golines --base-formatter gofumpt`
-- **Tests:** `go test ./...`
-- **Build:** `go build -o tk .`
+## Technology Stack
 
-## Structure (planned)
+| Component  | Technology                                      |
+| ---------- | ----------------------------------------------- |
+| Language   | Go 1.23+                                        |
+| CLI        | [Kong](https://github.com/alecthomas/kong)       |
+| Formatting | `golines --base-formatter gofumpt`              |
+| Colors     | `github.com/fatih/color` (NO_COLOR support)     |
+| Testing    | `go test` + `github.com/stretchr/testify`       |
 
-```
-cmd/          # cobra commands (one file per command)
-internal/
-  task/       # Task type, storage, CRUD
-  format/     # Table/JSON output
-  priority/   # Priority parsing
-  time/       # Time helpers
-main.go
-```
+## Code Standards
 
-## Storage Format
+| Aspect         | Standard                                                                 |
+| -------------- | ------------------------------------------------------------------------ |
+| Performance    | Use `strings.Builder` for ID generation; pre-allocate slices             |
+| Durability     | Atomic writes must `f.Sync()` and close before `os.Rename`               |
+| Precision      | Use `time.RFC3339Nano` for sub-second precision (matching TS ISO strings) |
+| Error handling | Propagate errors; return clear context for CLI reporting                 |
+| Naming         | Descriptive suffixes OVER versioning (e.g. `_async`); keep scope small   |
+| Interfaces     | Functional core (types) vs Imperative shell (storage/cmd)                |
 
-`.tasks/` directory — one JSON file per task, `config.json` for project config. Must be fully compatible with the TypeScript version (same schema, same filenames).
+## Verification Steps
 
-See `../tk/src/db/storage.ts` and `../tk/src/types.ts` for the canonical schema.
+Commands that must pass before any milestone:
+- **Build**: `go build -o tk .`
+- **Unit Tests**: `go test ./...`
+- **Manual Check**: `tk ready` and `tk ls -a` output verification
 
-## Key Behaviors
+## Distribution Plan
 
-- Task IDs: `project-ref` (e.g. `myapp-a7b3`), just the ref works everywhere
-- Prefix matching: `a7` resolves unambiguously
-- `NO_COLOR` env var disables color; auto-disabled when output is piped
-- `--json` flag works globally
-- `-C <dir>` runs in a different directory
-
-## Commands to Implement
-
-init, add, ls/list, ready, show, start, done, reopen, edit, log, block, unblock, rm/remove, clean, check, config, completions, help
-
-See `../tk/README.md` for full option reference.
-
-## Development Notes
-
-- Read the TypeScript source before implementing each command — match behavior exactly
-- No feature additions, no behavior changes — pure port
-- Write tests for priority parsing, time helpers, ID resolution, and storage
+- **Homebrew**: Push to `nijaru/homebrew-tap` (using Makefile/GoReleaser local test first)
+- **Go Install**: `go install github.com/nijaru/tk-go@latest`
