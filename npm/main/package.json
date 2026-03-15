@@ -1,0 +1,24 @@
+{
+  "name": "@nijaru/tk",
+  "version": "0.1.1",
+  "description": "Minimal task tracker CLI",
+  "homepage": "https://github.com/nijaru/tk",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nijaru/tk.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "tk": "bin/tk.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "optionalDependencies": {
+    "@nijaru/tk-darwin-arm64": "0.1.1",
+    "@nijaru/tk-darwin-x64": "0.1.1",
+    "@nijaru/tk-linux-arm64": "0.1.1",
+    "@nijaru/tk-linux-x64": "0.1.1",
+    "@nijaru/tk-win32-x64": "0.1.1"
+  }
+}

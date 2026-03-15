@@ -19,6 +19,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write # required for npm provenance
 
 jobs:
   release:
@@ -36,7 +37,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # --- Pre-flight: validate before any side effects ---
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install formatters
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install github.com/segmentio/golines@latest
+          go install mvdan.cc/gofumpt@latest
+
+      # --- Pre-flight: all checks before any side effects ---
 
       - name: Validate version format
         run: |
@@ -61,13 +73,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- Full CI suite ---
+      - name: Check npm version not already published
+        run: |
+          if npm view "@nijaru/tk@$VERSION" version 2>/dev/null | grep -qF "$VERSION"; then
+            echo "Error: @nijaru/tk@$VERSION is already published on npm"
+            exit 1
+          fi
+
+      # --- Full CI suite (superset of ci.yml) ---
+
+      - name: Check formatting
+        run: |
+          make fmt
+          git diff --exit-code || { echo "Run 'make fmt' and commit the changes."; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
 
       - name: Build
         run: go build -ldflags "-X main.version=v$VERSION" -o tk .
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Verify version flag
         run: |
@@ -77,7 +104,7 @@ jobs:
             exit 1
           fi
 
-      # --- Release (GoReleaser creates the tag after successful publish) ---
+      # --- Publish: GoReleaser → npm (tag is created by GoReleaser, goes last) ---
 
       - name: Run GoReleaser
         if: ${{ !inputs.dry_run }}
@@ -89,3 +116,72 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_UPDATE_TOKEN: ${{ secrets.TAP_UPDATE_TOKEN }}
+
+      - name: Publish npm packages
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Download binaries built by GoReleaser from the new GitHub release
+          mkdir -p dist/npm-dl
+          gh release download "v$VERSION" --dir dist/npm-dl --pattern "*.tar.gz" --pattern "*.zip"
+
+          # Publish each platform-specific package
+          # Columns: npm-platform  goreleaser-archive              binary-name
+          while IFS=$'\t' read -r NPM_PLATFORM ARCHIVE BINNAME; do
+            PKG_DIR="dist/npm-pkgs/${NPM_PLATFORM}"
+            mkdir -p "${PKG_DIR}/bin"
+
+            # Extract binary from archive
+            TMPDIR=$(mktemp -d)
+            if [[ "$ARCHIVE" == *.zip ]]; then
+              unzip -q "dist/npm-dl/${ARCHIVE}" -d "$TMPDIR"
+            else
+              tar -xzf "dist/npm-dl/${ARCHIVE}" -C "$TMPDIR"
+            fi
+            BIN_PATH=$(find "$TMPDIR" -name "$BINNAME" -type f | head -1)
+            cp "$BIN_PATH" "${PKG_DIR}/bin/${BINNAME}"
+            [[ "$BINNAME" != *.exe ]] && chmod +x "${PKG_DIR}/bin/${BINNAME}"
+            rm -rf "$TMPDIR"
+
+            # Generate package.json
+            OS="${NPM_PLATFORM%-*}"
+            CPU="${NPM_PLATFORM##*-}"
+            jq -n \
+              --arg name "@nijaru/tk-${NPM_PLATFORM}" \
+              --arg ver  "$VERSION" \
+              --arg desc "tk binary for ${NPM_PLATFORM}" \
+              --arg os   "$OS" \
+              --arg cpu  "$CPU" \
+              '{
+                name: $name, version: $ver, description: $desc,
+                os: [$os], cpu: [$cpu], license: "MIT",
+                repository: {type: "git", url: "https://github.com/nijaru/tk.git"}
+              }' > "${PKG_DIR}/package.json"
+
+            npm publish "${PKG_DIR}" --access public --provenance
+          done <<-'PLATFORMS'
+          darwin-arm64	tk_darwin_arm64.tar.gz	tk
+          darwin-x64	tk_darwin_amd64.tar.gz	tk
+          linux-arm64	tk_linux_arm64.tar.gz	tk
+          linux-x64	tk_linux_amd64.tar.gz	tk
+          win32-x64	tk_windows_amd64.zip	tk.exe
+          PLATFORMS
+
+          # Publish main wrapper package @nijaru/tk
+          MAIN_DIR="dist/npm-main"
+          mkdir -p "${MAIN_DIR}/bin"
+          cp npm/main/bin/tk.js "${MAIN_DIR}/bin/"
+          chmod +x "${MAIN_DIR}/bin/tk.js"
+
+          # Substitute version into package.json template
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies |= with_entries(.value = $v)
+          ' npm/main/package.json > "${MAIN_DIR}/package.json"
+
+          npm publish "${MAIN_DIR}" --access public --provenance

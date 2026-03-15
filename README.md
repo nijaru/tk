@@ -20,6 +20,12 @@ brew install nijaru/tap/tk
 go install github.com/nijaru/tk@latest
 ```
 
+### npm
+
+```bash
+npm install -g @nijaru/tk
+```
+
 ### Build from source
 
 ```bash

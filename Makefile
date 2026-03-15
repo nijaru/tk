@@ -1,7 +1,7 @@
 BINARY_NAME=tk
 VERSION?=dev
 
-.PHONY: fmt build test clean install release-test
+.PHONY: fmt vet build test clean install release-test
 
 fmt:
 	@files="$$(git ls-files '*.go')"; \
@@ -11,6 +11,9 @@ fmt:
 		goimports -w $$files; \
 		golines --base-formatter gofumpt -w $$files; \
 	fi
+
+vet:
+	go vet ./...
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY_NAME) .
