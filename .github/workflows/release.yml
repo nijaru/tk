@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., 0.0.6)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run (build only, no publish)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: version must be X.Y.Z (got: $VERSION)"
+            exit 1
+          fi
+
+      - name: Check tag does not exist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+            echo "Error: tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Build
+        env:
+          VERSION: ${{ inputs.version }}
+        run: go build -ldflags "-X main.version=v$VERSION" -o tk .
+
+      - name: Test
+        run: go test ./...
+
+      - name: Verify version flag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          OUTPUT=$(./tk --version)
+          if ! echo "$OUTPUT" | grep -qF "v$VERSION"; then
+            echo "Error: binary reports '$OUTPUT', expected v$VERSION"
+            exit 1
+          fi
+
+      - name: Tag release
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Run GoReleaser
+        if: ${{ !inputs.dry_run }}
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_UPDATE_TOKEN: ${{ secrets.TAP_UPDATE_TOKEN }}
