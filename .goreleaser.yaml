@@ -26,7 +26,7 @@ archives:
       - goos: windows
         format: zip
 
-homebrew_taps:
+brews:
   - name: tk
     directory: Formula
     repository:
