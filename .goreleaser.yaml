@@ -26,8 +26,9 @@ archives:
       - goos: windows
         format: zip
 
-brews:
+homebrew_taps:
   - name: tk
+    directory: Formula
     repository:
       owner: nijaru
       name: homebrew-tap
