@@ -104,7 +104,14 @@ jobs:
             exit 1
           fi
 
-      # --- Publish: GoReleaser → npm (tag is created by GoReleaser, goes last) ---
+      # --- Publish: GoReleaser → npm (tag is created locally first for GoReleaser) ---
+
+      - name: Create local tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
 
       - name: Run GoReleaser
         if: ${{ !inputs.dry_run }}
