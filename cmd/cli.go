@@ -42,18 +42,29 @@ func (c *CLI) AfterApply() error {
 }
 
 func Run(args []string, version string) int {
+	if len(args) == 0 {
+		args = []string{"--help"}
+	}
 	cli := &CLI{}
-	ctx := kong.Parse(cli,
+	parser, err := kong.New(cli,
 		kong.Name("tk"),
 		kong.Description("Minimal task tracker."),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
 		kong.Vars{"version": version},
 	)
-
-	err := ctx.Run(cli)
 	if err != nil {
-		ctx.Errorf("%v", err)
+		panic(err)
+	}
+
+	ctx, err := parser.Parse(args)
+	if err != nil {
+		parser.Errorf("%v", err)
+		return 1
+	}
+
+	if err := ctx.Run(cli); err != nil {
+		parser.Errorf("%v", err)
 		return 1
 	}
 	return 0
