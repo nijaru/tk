@@ -1,0 +1,181 @@
+package task
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+type Status string
+
+const (
+	StatusOpen   Status = "open"
+	StatusActive Status = "active"
+	StatusDone   Status = "done"
+)
+
+type Priority int
+
+const (
+	PriorityNone   Priority = 0
+	PriorityUrgent Priority = 1
+	PriorityHigh   Priority = 2
+	PriorityMedium Priority = 3
+	PriorityLow    Priority = 4
+)
+
+var PriorityLabels = map[Priority]string{
+	0: "none",
+	1: "urgent",
+	2: "high",
+	3: "medium",
+	4: "low",
+}
+
+var PriorityFromName = map[string]Priority{
+	"none":   0,
+	"urgent": 1,
+	"high":   2,
+	"medium": 3,
+	"low":    4,
+}
+
+type LogEntry struct {
+	Ts  string `json:"ts"`
+	Msg string `json:"msg"`
+}
+
+type ExternalLink struct {
+	Number   *int    `json:"number,omitempty"`
+	Repo     *string `json:"repo,omitempty"`
+	SyncedAt *string `json:"synced_at,omitempty"`
+}
+
+type External struct {
+	GitHub *ExternalLink `json:"github,omitempty"`
+	Linear *ExternalLink `json:"linear,omitempty"`
+	Jira   *ExternalLink `json:"jira,omitempty"`
+}
+
+type Task struct {
+	Project     string     `json:"project"`
+	Ref         string     `json:"ref"`
+	Title       string     `json:"title"`
+	Description *string    `json:"description"`
+	Status      Status     `json:"status"`
+	Priority    Priority   `json:"priority"`
+	Labels      []string   `json:"labels"`
+	Assignees   []string   `json:"assignees"`
+	Parent      *string    `json:"parent"`
+	BlockedBy   []string   `json:"blocked_by"`
+	Estimate    *int       `json:"estimate"`
+	DueDate     *string    `json:"due_date"`
+	Logs        []LogEntry `json:"logs"`
+	CreatedAt   string     `json:"created_at"`
+	UpdatedAt   string     `json:"updated_at"`
+	CompletedAt *string    `json:"completed_at"`
+	External    External   `json:"external"`
+}
+
+type TaskWithMeta struct {
+	Task
+	ID                  string `json:"id"`
+	BlockedByIncomplete bool   `json:"blocked_by_incomplete"`
+	IsOverdue           bool   `json:"is_overdue"`
+	DaysUntilDue        *int   `json:"days_until_due"`
+}
+
+// CleanAfter represents clean_after which can be a number of days or false (disabled).
+type CleanAfter struct {
+	Enabled bool
+	Days    int
+}
+
+func (c CleanAfter) MarshalJSON() ([]byte, error) {
+	if !c.Enabled {
+		return []byte("false"), nil
+	}
+	return json.Marshal(c.Days)
+}
+
+func (c *CleanAfter) UnmarshalJSON(data []byte) error {
+	if string(data) == "false" {
+		c.Enabled = false
+		c.Days = 0
+		return nil
+	}
+	c.Enabled = true
+	return json.Unmarshal(data, &c.Days)
+}
+
+type ConfigDefaults struct {
+	Priority  Priority `json:"priority"`
+	Labels    []string `json:"labels"`
+	Assignees []string `json:"assignees"`
+}
+
+type Config struct {
+	Version    int               `json:"version"`
+	Project    string            `json:"project"`
+	Defaults   ConfigDefaults    `json:"defaults"`
+	CleanAfter CleanAfter        `json:"clean_after"`
+	Aliases    map[string]string `json:"aliases,omitempty"`
+}
+
+var DefaultConfig = Config{
+	Version: 1,
+	Project: "tk",
+	Defaults: ConfigDefaults{
+		Priority:  PriorityMedium,
+		Labels:    []string{},
+		Assignees: []string{},
+	},
+	CleanAfter: CleanAfter{Enabled: true, Days: 14},
+}
+
+// TaskID returns the full task ID from project and ref.
+func TaskID(project, ref string) string {
+	return project + "-" + ref
+}
+
+// ID returns the full task ID.
+func (t *Task) ID() string {
+	return TaskID(t.Project, t.Ref)
+}
+
+var idPattern = regexp.MustCompile(`^([a-z][a-z0-9]*)-([a-z0-9]+)$`)
+
+// ParseID parses "project-ref" into its components.
+func ParseID(id string) (project, ref string, ok bool) {
+	m := idPattern.FindStringSubmatch(strings.ToLower(id))
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
+const refChars = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// GenerateRef generates a random 4-char alphanumeric ref without modulo bias.
+func GenerateRef() (string, error) {
+	const length = 4
+	const charsetLen = byte(len(refChars))
+	maxValid := charsetLen * (255 / charsetLen) // reject >= maxValid to avoid bias
+
+	result := make([]byte, 0, length)
+	buf := make([]byte, length*2)
+
+	for len(result) < length {
+		if _, err := rand.Read(buf); err != nil {
+			return "", fmt.Errorf("generate ref: %w", err)
+		}
+		for _, b := range buf {
+			if b < maxValid && len(result) < length {
+				result = append(result, refChars[b%charsetLen])
+			}
+		}
+	}
+	return string(result), nil
+}
