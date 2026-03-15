@@ -8,8 +8,9 @@ import (
 // CLI is the root Kong command struct.
 type CLI struct {
 	// Global flags
-	JSON bool   `short:"j" help:"Output as JSON"`
-	Dir  string `short:"C" help:"Run in directory" default:""`
+	Version kong.VersionFlag `short:"V" name:"version" help:"Print version and exit"`
+	JSON    bool             `short:"j"                help:"Output as JSON"`
+	Dir     string           `short:"C"                help:"Run in directory"       default:""`
 
 	// Commands
 	Init        InitCmd        `cmd:"" help:"Initialize .tasks/ in current directory"`
@@ -32,7 +33,7 @@ type CLI struct {
 	Mv          MvCmd          `cmd:"" help:"Move a task to a different project"      name:"mv"`
 }
 
-// Run sets the working directory if -C was provided.
+// AfterApply sets the working directory if -C was provided.
 func (c *CLI) AfterApply() error {
 	if c.Dir != "" {
 		return task.SetWorkingDir(c.Dir)
@@ -40,13 +41,14 @@ func (c *CLI) AfterApply() error {
 	return nil
 }
 
-func Run(args []string) int {
+func Run(args []string, version string) int {
 	cli := &CLI{}
 	ctx := kong.Parse(cli,
 		kong.Name("tk"),
 		kong.Description("Minimal task tracker."),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
+		kong.Vars{"version": version},
 	)
 
 	err := ctx.Run(cli)
