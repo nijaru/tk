@@ -1,6 +1,6 @@
 # Status
 
-**State:** `v0.1.2` release in progress. OIDC trusted publishing configured on Node 24 (LTS).
+**State:** `v0.1.3` release in progress. OIDC trusted publishing configured on Node 24 (LTS).
 
 ## What's on Main
 
@@ -17,7 +17,8 @@ Full review pass fixes + npm pipeline with GoReleaser v2 corrections:
 
 - `@nijaru/tk` wrapper and 5 platform packages (`@nijaru/tk-{darwin-arm64,darwin-x64,linux-arm64,linux-x64,win32-x64}`) are live on the registry.
 - `v0.1.1` was manually published to npm to circumvent initial CI workflow errors.
-- **Workflow update:** `release.yml` uses 100% tokenless OIDC. The workflow now targets **Node 24 (LTS)** and ensures the **npm CLI is v11.5.1 or later**. It uses `NPM_CONFIG_PROVENANCE: true` and `registry-url` to ensure the OIDC exchange is correctly triggered without manual secrets.
+- **Workflow update:** `release.yml` uses 100% tokenless OIDC. The workflow now targets **Node 24 (LTS)** and ensures the **npm CLI is v11.5.1 or later**. It uses `NPM_CONFIG_PROVENANCE: true` and `registry-url` to ensure the OIDC exchange is correctly triggered.
+- **Path Prefixing:** Fixed a bug where `npm publish <path>` was misinterpreted as a Git URL (triggering `git ls-remote` and permission errors) by prefixing local paths with `./` (e.g., `npm publish "./dist/npm-main"`).
 
 ## Distribution
 
