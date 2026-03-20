@@ -50,7 +50,7 @@ func Run(args []string, version string) int {
 		kong.Name("tk"),
 		kong.Description("Minimal task tracker."),
 		kong.UsageOnError(),
-		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
+		kong.ConfigureHelp(kong.HelpOptions{Compact: true, NoExpandSubcommands: true}),
 		kong.Vars{"version": version},
 	)
 	if err != nil {
