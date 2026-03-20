@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
+	"cmp"
 
 	"github.com/nijaru/tk/internal/timeutil"
 )
@@ -82,11 +83,11 @@ var statusOrder = map[Status]int{
 	StatusDone:   2,
 }
 
-func compareTasks(a, b *Task) bool {
+func compareTasks(a, b *Task) int {
 	sa := statusOrder[a.Status]
 	sb := statusOrder[b.Status]
 	if sa != sb {
-		return sa < sb
+		return cmp.Compare(sa, sb)
 	}
 
 	if a.Status != StatusDone {
@@ -100,7 +101,7 @@ func compareTasks(a, b *Task) bool {
 			ob = 0
 		}
 		if oa != ob {
-			return oa < ob
+			return cmp.Compare(oa, ob)
 		}
 
 		// Priority (1-4, then 0/none)
@@ -113,7 +114,7 @@ func compareTasks(a, b *Task) bool {
 			pb = 5
 		}
 		if pa != pb {
-			return pa < pb
+			return cmp.Compare(pa, pb)
 		}
 
 		// Due date (soonest first, nulls last)
@@ -121,16 +122,16 @@ func compareTasks(a, b *Task) bool {
 		db := b.DueDate
 		if da != nil && db != nil {
 			if *da != *db {
-				return *da < *db
+				return cmp.Compare(*da, *db)
 			}
 		} else if da != nil {
-			return true
+			return -1
 		} else if db != nil {
-			return false
+			return 1
 		}
 
 		// Created at (newest first)
-		return b.CreatedAt < a.CreatedAt
+		return cmp.Compare(b.CreatedAt, a.CreatedAt)
 	}
 
 	// Done tasks: newest completion first
@@ -142,7 +143,7 @@ func compareTasks(a, b *Task) bool {
 	if b.CompletedAt != nil {
 		cb = *b.CompletedAt
 	}
-	return cb < ca
+	return cmp.Compare(cb, ca)
 }
 
 // --- Config Operations ---
@@ -458,9 +459,7 @@ func ListTasks(options ListOptions) ([]*TaskWithMeta, error) {
 		filtered = append(filtered, t)
 	}
 
-	sort.Slice(filtered, func(i, j int) bool {
-		return compareTasks(filtered[i], filtered[j])
-	})
+	slices.SortFunc(filtered, compareTasks)
 
 	if options.Limit > 0 && len(filtered) > options.Limit {
 		filtered = filtered[:options.Limit]
