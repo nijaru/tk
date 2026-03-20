@@ -1,11 +1,13 @@
 # Status
 
-**State:** `v0.1.1` released. CI/CD Pipeline fully operational and validated for tokenless OIDC npm publishing.
+**State:** `v0.1.2` release in progress. OIDC trusted publishing configured.
 
 ## What's on Main
 
 Full review pass fixes + npm pipeline with GoReleaser v2 corrections:
 
+- Modernized task sorting using `slices.SortFunc` and `cmp.Compare` (Go 1.21+ standard)
+- Help output fix: `NoExpandSubcommands: true` in root help
 - ParseID regex, writeTaskFileExclusive cleanup, CleanTasks O(n), GetTask N+1, block/unblock/log storage funcs
 - completions real scripts, applySliceUpdates sorted, CI race tests
 - npm platform packages + wrapper: `npm/main/package.json`, `npm/main/bin/tk.js`
@@ -15,7 +17,7 @@ Full review pass fixes + npm pipeline with GoReleaser v2 corrections:
 
 - `@nijaru/tk` wrapper and 5 platform packages (`@nijaru/tk-{darwin-arm64,darwin-x64,linux-arm64,linux-x64,win32-x64}`) are live on the registry.
 - `v0.1.1` was manually published to npm to circumvent initial CI workflow errors.
-- **Workflow is fixed for future releases:** The `release.yml` uses 100% tokenless OIDC for all 6 packages. The `actions/setup-node@v4` no longer uses `registry-url`, preventing `.npmrc` conflicts with OIDC.
+- **Workflow update:** `release.yml` uses 100% tokenless OIDC. Re-added `registry-url` to `setup-node` which is required for the npm CLI to trigger OIDC exchange in GitHub Actions, and removed the empty `NODE_AUTH_TOKEN` env.
 
 ## Distribution
 
