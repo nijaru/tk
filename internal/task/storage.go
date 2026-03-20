@@ -1,6 +1,7 @@
 package task
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"cmp"
 
 	"github.com/nijaru/tk/internal/timeutil"
 )
