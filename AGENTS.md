@@ -52,7 +52,7 @@ Feature-complete, single-binary, no-dependency successor.
 Commands that must pass before any milestone:
 - **Build**: `go build -o tk .`
 - **Unit Tests**: `go test ./...`
-- **Manual Check**: `tk ready` and `tk ls -a` output verification
+- **Manual Check**: `tk ready` and `tk list -a` output verification
 
 ## Distribution Plan
 

@@ -15,8 +15,8 @@ type CLI struct {
 	// Commands
 	Init        InitCmd        `cmd:"" help:"Initialize .tasks/ in current directory"`
 	Add         AddCmd         `cmd:"" help:"Create a task"`
-	Ls          LsCmd          `cmd:"" help:"List tasks"                                 name:"ls" aliases:"list"`
-	Ready       ReadyCmd       `cmd:"" help:"List active/open unblocked tasks"`
+	List        LsCmd          `cmd:"" help:"List tasks"                                 aliases:"ls"`
+	Ready       ReadyCmd       `cmd:"" help:"List active/open unblocked tasks"           aliases:"rdy"`
 	Show        ShowCmd        `cmd:"" help:"Show task details"`
 	Start       StartCmd       `cmd:"" help:"Start working on a task (open → active)"`
 	Done        DoneCmd        `cmd:"" help:"Complete a task"`
@@ -25,12 +25,12 @@ type CLI struct {
 	Log         LogCmd         `cmd:"" help:"Add a log entry to a task"`
 	Block       BlockCmd       `cmd:"" help:"Add a blocker dependency"`
 	Unblock     UnblockCmd     `cmd:"" help:"Remove a blocker dependency"`
-	Rm          RmCmd          `cmd:"" help:"Delete a task"                              name:"rm" aliases:"remove"`
+	Remove      RmCmd          `cmd:"" help:"Delete a task"                              aliases:"rm"`
 	Clean       CleanCmd       `cmd:"" help:"Remove old completed tasks"`
 	Check       CheckCmd       `cmd:"" help:"Check task integrity"`
 	Config      ConfigCmd      `cmd:"" help:"Show or set configuration"`
 	Completions CompletionsCmd `cmd:"" help:"Output shell completions (bash, zsh, fish)"`
-	Mv          MvCmd          `cmd:"" help:"Move a task to a different project"         name:"mv"`
+	Mv          MvCmd          `cmd:"" help:"Move a task to a different project"`
 }
 
 // AfterApply sets the working directory if -C was provided.

@@ -76,8 +76,8 @@ myapp-x9k2  | p2   | open         | Write tests
 | --------------------------- | ------------------------------------------ |
 | `tk init`                   | Initialize (project name from directory)   |
 | `tk add <title>`            | Create task                                |
-| `tk ls` / `tk list`         | List tasks                                 |
-| `tk ready`                  | List active/open + unblocked tasks         |
+| `tk list` / `tk ls`         | List tasks                                 |
+| `tk ready` / `tk rdy`       | List active/open + unblocked tasks         |
 | `tk show <id>`              | Show task details                          |
 | `tk start <id>`             | Start working (open → active)              |
 | `tk done <id>`              | Complete task                              |
@@ -86,7 +86,7 @@ myapp-x9k2  | p2   | open         | Write tests
 | `tk log <id> "<msg>"`       | Add log entry                              |
 | `tk block <id> <blocker>`   | Add dependency (id blocked by blocker)     |
 | `tk unblock <id> <blocker>` | Remove dependency                          |
-| `tk rm <id>`                | Delete task (prompts for confirmation)     |
+| `tk remove` / `tk rm <id>`  | Delete task (prompts for confirmation)     |
 | `tk mv <id> <project>`      | Move task to a different project           |
 | `tk clean`                  | Remove old done tasks (default: 14 days)   |
 | `tk check`                  | Check task integrity                       |
@@ -110,17 +110,17 @@ tk add "Title" --due +7d             # Relative due date (+Nh/+Nd/+Nw/+Nm)
 ## List Options
 
 ```bash
-tk ls                          # List tasks (limit 20)
-tk ls -a                       # Show all
-tk ls -s active                # Filter by status
-tk ls -p 1                     # Filter by priority
-tk ls -P api                   # Filter by project
-tk ls -l bug                   # Filter by label
-tk ls --assignee nick          # Filter by assignee
-tk ls --parent a7b3            # Filter by parent
-tk ls --roots                  # Top-level tasks only
-tk ls --overdue                # Overdue tasks only
-tk ls -n 10                    # Limit results
+tk list                        # List tasks (limit 20)
+tk list -a                     # Show all
+tk list -s active              # Filter by status
+tk list -p 1                   # Filter by priority
+tk list -P api                 # Filter by project
+tk list -l bug                 # Filter by label
+tk list --assignee nick        # Filter by assignee
+tk list --parent a7b3          # Filter by parent
+tk list --roots                # Top-level tasks only
+tk list --overdue              # Overdue tasks only
+tk list -n 10                  # Limit results
 ```
 
 ## Edit Options
