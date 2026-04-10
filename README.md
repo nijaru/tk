@@ -41,10 +41,10 @@ $ cd myapp
 $ tk init                               # project auto-derived from directory
 Initialized: .tasks
 
-$ tk add "Implement auth" -p 1
+$ tk add Implement auth -p 1
 Created task myapp-a7b3: Implement auth
 
-$ tk add "Write tests" -p 2
+$ tk add Write tests -p 2
 Created task myapp-x9k2: Write tests
 
 $ tk block x9k2 a7b3                    # tests blocked by auth
@@ -55,10 +55,10 @@ ID          | PRIO | STATUS       | TITLE
 -----------------------------------------------------------------
 myapp-a7b3  | p1   | open         | Implement auth
 
-$ tk start a7b3
+$ tk start a7b3                         # or tk active a7b3
 Started myapp-a7b3: Implement auth
 
-$ tk log a7b3 "Using JWT approach"
+$ tk log a7b3 Using JWT approach
 Logged to myapp-a7b3: Using JWT approach
 
 $ tk done a7b3
@@ -76,19 +76,22 @@ myapp-x9k2  | p2   | open         | Write tests
 | --------------------------- | ------------------------------------------ |
 | `tk init`                   | Initialize (project name from directory)   |
 | `tk add <title>`            | Create task                                |
-| `tk list` / `tk ls`         | List tasks                                 |
+| `tk list` / `tk ls`         | List tasks (hides done/closed by default)  |
+| `tk ls <query>`             | Search tasks by title or description       |
 | `tk ready` / `tk rdy`       | List active/open + unblocked tasks         |
 | `tk show <id>`              | Show task details                          |
-| `tk start <id>`             | Start working (open → active)              |
+| `tk start <id>` / `active`  | Start working (open → active)              |
+| `tk open <id>`              | Reset task status to open                  |
+| `tk defer <id>`             | Defer task                                 |
 | `tk done <id>`              | Complete task                              |
-| `tk reopen <id>`            | Reopen task                                |
+| `tk close <id>`             | Close/cancel task                          |
 | `tk edit <id>`              | Edit task                                  |
-| `tk log <id> "<msg>"`       | Add log entry                              |
+| `tk log <id> <msg>`         | Add log entry                              |
 | `tk block <id> <blocker>`   | Add dependency (id blocked by blocker)     |
 | `tk unblock <id> <blocker>` | Remove dependency                          |
 | `tk remove` / `tk rm <id>`  | Delete task (prompts for confirmation)     |
-| `tk mv <id> <project>`      | Move task to a different project           |
-| `tk clean`                  | Remove old done tasks (default: 14 days)   |
+| `tk mv <id> <project>`      | Move task or rename entire project         |
+| `tk clean`                  | Remove old terminal tasks (default: 14d)   |
 | `tk check`                  | Check task integrity                       |
 | `tk config`                 | Show/set configuration                     |
 | `tk completions <shell>`    | Output shell completions (bash, zsh, fish) |
@@ -96,15 +99,15 @@ myapp-x9k2  | p2   | open         | Write tests
 ## Add Options
 
 ```bash
-tk add "Title" -p 2                  # Priority (0-4)
-tk add "Title" -P api                # Project prefix
-tk add "Title" -d "Description"      # Description
-tk add "Title" -l bug,urgent         # Labels (CSV)
-tk add "Title" -A nick,alice         # Assignees (CSV, @me for git user)
-tk add "Title" --parent a7b3         # Parent task
-tk add "Title" --estimate 3          # Estimate (user-defined units)
-tk add "Title" --due 2026-01-15      # Due date (YYYY-MM-DD)
-tk add "Title" --due +7d             # Relative due date (+Nh/+Nd/+Nw/+Nm)
+tk add Title -p 2                  # Priority (0-4)
+tk add Title -P api                # Project prefix
+tk add Title -d "Description"      # Description
+tk add Title -l bug,urgent         # Labels (CSV)
+tk add Title -A nick,alice         # Assignees (CSV, @me for git user)
+tk add Title --parent a7b3         # Parent task
+tk add Title --estimate 3          # Estimate (user-defined units)
+tk add Title --due 2026-01-15      # Due date (YYYY-MM-DD)
+tk add Title --due +7d             # Relative due date (+Nh/+Nd/+Nw/+Nm)
 ```
 
 ## List Options
@@ -180,15 +183,6 @@ tk completions zsh > "${fpath[1]}/_tk"
 ## Environment
 
 - `NO_COLOR` — Disable colored output
-
-## Storage
-
-Plain JSON files in `.tasks/` — one file per task, one config file.
-
-## License
-
-[MIT](LICENSE)
-olored output
 
 ## Storage
 
