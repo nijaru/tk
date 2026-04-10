@@ -79,12 +79,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check npm version not already published
+      - name: Check npm versions not already published
         run: |
+          # Check main wrapper
           if npm view "@nijaru/tk@$VERSION" version 2>/dev/null | grep -qF "$VERSION"; then
             echo "Error: @nijaru/tk@$VERSION is already published on npm"
             exit 1
           fi
+          # Check all platform packages
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
+            if npm view "@nijaru/tk-${platform}@$VERSION" version 2>/dev/null | grep -qF "$VERSION"; then
+              echo "Error: @nijaru/tk-${platform}@$VERSION is already published on npm"
+              exit 1
+            fi
+          done
 
       # --- Full CI suite (superset of ci.yml) ---
 
@@ -144,8 +152,7 @@ jobs:
           mkdir -p dist/npm-dl
           gh release download "v$VERSION" --dir dist/npm-dl --pattern "*.tar.gz" --pattern "*.zip"
 
-          # Publish each platform-specific package via npm trusted publishing (OIDC)
-          # Columns: npm-platform  goreleaser-archive              binary-name
+          # 1. Prepare all platform-specific packages
           while IFS=$'\t' read -r NPM_PLATFORM ARCHIVE BINNAME; do
             PKG_DIR="dist/npm-pkgs/${NPM_PLATFORM}"
             mkdir -p "${PKG_DIR}/bin"
@@ -176,8 +183,6 @@ jobs:
                 os: [$os], cpu: [$cpu], license: "MIT",
                 repository: {type: "git", url: "https://github.com/nijaru/tk.git"}
               }' > "${PKG_DIR}/package.json"
-
-            npm publish "./${PKG_DIR}" --access public
           done <<-'PLATFORMS'
           darwin-arm64	tk_darwin_arm64.tar.gz	tk
           darwin-x64	tk_darwin_amd64.tar.gz	tk
@@ -186,7 +191,7 @@ jobs:
           win32-x64	tk_windows_amd64.zip	tk.exe
           PLATFORMS
 
-          # Publish main wrapper package @nijaru/tk
+          # 2. Prepare main wrapper package @nijaru/tk
           MAIN_DIR="dist/npm-main"
           mkdir -p "${MAIN_DIR}/bin"
           cp npm/main/bin/tk.js "${MAIN_DIR}/bin/"
@@ -198,4 +203,9 @@ jobs:
             .optionalDependencies |= with_entries(.value = $v)
           ' npm/main/package.json > "${MAIN_DIR}/package.json"
 
+          # 3. Publish everything now that preparation is complete
+          # (This minimizes the time between first and last publish)
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
+            npm publish "./dist/npm-pkgs/${platform}" --access public
+          done
           npm publish "./${MAIN_DIR}" --access public
