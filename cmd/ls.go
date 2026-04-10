@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/nijaru/tk/internal/format"
 	"github.com/nijaru/tk/internal/priority"
@@ -9,8 +10,9 @@ import (
 )
 
 type LsCmd struct {
-	All      bool   `short:"a" help:"Show all (no limit)"`
-	Status   string `short:"s" help:"Filter by status (open/active/done)"`
+	Search   []string `arg:"" optional:"" help:"Search title/description"`
+	All      bool     `short:"a" help:"Show all (including done, no limit)"`
+	Status   string   `short:"s" help:"Filter by status (open/active/done)"`
 	Priority string `short:"p" help:"Filter by priority"`
 	Project  string `short:"P" help:"Filter by project"`
 	Label    string `short:"l" help:"Filter by label"`
@@ -22,8 +24,13 @@ type LsCmd struct {
 }
 
 func (c *LsCmd) Run(cli *CLI) error {
+	searchQuery := strings.Join(c.Search, " ")
+	hideTerminal := !c.All && !task.IsTerminalStatus(task.Status(c.Status))
+
 	opts := task.ListOptions{
-		Status:   task.Status(c.Status),
+		Search:       searchQuery,
+		HideTerminal: hideTerminal,
+		Status:       task.Status(c.Status),
 		Project:  c.Project,
 		Label:    c.Label,
 		Assignee: c.Assignee,

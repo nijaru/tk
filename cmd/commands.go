@@ -25,7 +25,7 @@ func (c *CompletionsCmd) Run(cli *CLI) error {
 const fishCompletion = `# tk shell completions for fish
 # Install: tk completions fish > ~/.config/fish/completions/tk.fish
 
-set -l commands init add list ready show start done reopen edit log block unblock remove clean check config mv completions
+set -l commands init add list ready show start open done edit log block unblock remove clean check config mv completions
 
 complete -c tk -f
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -s h -l help    -d 'Show help'
@@ -39,8 +39,8 @@ complete -c tk -n "not __fish_seen_subcommand_from $commands" -a list        -d 
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a ready       -d 'List active/open unblocked tasks'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a show        -d 'Show task details'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a start       -d 'Start working on a task'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a open        -d 'Reset a task status to open'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a done        -d 'Complete a task'
-complete -c tk -n "not __fish_seen_subcommand_from $commands" -a reopen      -d 'Reopen a completed task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a edit        -d 'Edit a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a log         -d 'Add a log entry to a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a block       -d 'Add a blocker dependency'
@@ -59,7 +59,7 @@ const bashCompletion = `# tk shell completions for bash
 _tk() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local commands="init add list ready show start done reopen edit log block unblock remove clean check config mv completions"
+    local commands="init add list ready show start open done edit log block unblock remove clean check config mv completions"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -99,8 +99,10 @@ _tk() {
                 'ready:List active/open unblocked tasks'
                 'show:Show task details'
                 'start:Start working on a task'
+                'open:Reset a task status to open'
+                'defer:Defer a task'
                 'done:Complete a task'
-                'reopen:Reopen a completed task'
+                'close:Close/cancel a task'
                 'edit:Edit a task'
                 'log:Add a log entry to a task'
                 'block:Add a blocker dependency'

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/nijaru/tk/internal/format"
 	"github.com/nijaru/tk/internal/priority"
@@ -10,7 +11,7 @@ import (
 )
 
 type AddCmd struct {
-	Title     string   `arg:"" help:"Task title"`
+	Title     []string `arg:"" help:"Task title"`
 	Priority  string   `       help:"Priority (0-4, p0-p4, or none/urgent/high/medium/low)" short:"p"`
 	Project   string   `       help:"Project prefix"                                        short:"P"`
 	Desc      string   `       help:"Description"                                           short:"d"`
@@ -52,7 +53,7 @@ func (c *AddCmd) Run(cli *CLI) error {
 	}
 
 	opts := task.CreateTaskOptions{
-		Title:     c.Title,
+		Title:     strings.Join(c.Title, " "),
 		Priority:  prio,
 		Project:   c.Project,
 		Labels:    c.Labels,

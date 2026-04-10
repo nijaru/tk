@@ -78,9 +78,16 @@ func atomicWrite(path string, content []byte) error {
 // --- Sorting ---
 
 var statusOrder = map[Status]int{
-	StatusActive: 0,
-	StatusOpen:   1,
-	StatusDone:   2,
+	StatusActive:   0,
+	StatusOpen:     1,
+	StatusDeferred: 2,
+	StatusDone:     3,
+	StatusClosed:   4,
+}
+
+// IsTerminalStatus returns true if the status is done or closed.
+func IsTerminalStatus(s Status) bool {
+	return s == StatusDone || s == StatusClosed
 }
 
 func compareTasks(a, b *Task) int {
@@ -90,14 +97,14 @@ func compareTasks(a, b *Task) int {
 		return cmp.Compare(sa, sb)
 	}
 
-	if a.Status != StatusDone {
+	if !IsTerminalStatus(a.Status) {
 		// Overdue hoist
 		oa := 1
 		if timeutil.IsOverdue(a.DueDate, a.Status == StatusDone) {
 			oa = 0
 		}
 		ob := 1
-		if timeutil.IsOverdue(b.DueDate, b.Status == StatusDone) {
+		if timeutil.IsOverdue(b.DueDate, IsTerminalStatus(b.Status)) {
 			ob = 0
 		}
 		if oa != ob {
@@ -370,15 +377,17 @@ func EnrichTask(task *Task, statusMap map[string]Status) *TaskWithMeta {
 		Task:                *task,
 		ID:                  task.ID(),
 		BlockedByIncomplete: blockedByIncomplete,
-		IsOverdue:           timeutil.IsOverdue(task.DueDate, task.Status == StatusDone),
-		DaysUntilDue:        timeutil.DaysUntilDue(task.DueDate, task.Status == StatusDone),
+		IsOverdue:           timeutil.IsOverdue(task.DueDate, IsTerminalStatus(task.Status)),
+		DaysUntilDue:        timeutil.DaysUntilDue(task.DueDate, IsTerminalStatus(task.Status)),
 	}
 }
 
 // --- List Operations ---
 
 type ListOptions struct {
-	Status   Status
+	Search       string
+	HideTerminal bool
+	Status       Status
 	Priority *Priority
 	Project  string
 	Label    string
@@ -409,6 +418,18 @@ func ListTasks(options ListOptions) ([]*TaskWithMeta, error) {
 	for _, t := range allTasks {
 		if options.Status != "" && t.Status != options.Status {
 			continue
+		}
+		if options.HideTerminal && IsTerminalStatus(t.Status) {
+			continue
+		}
+		if options.Search != "" {
+			query := strings.ToLower(options.Search)
+			titleMatch := strings.Contains(strings.ToLower(t.Title), query)
+			descMatch := t.Description != nil && strings.Contains(strings.ToLower(*t.Description), query)
+			idMatch := strings.Contains(strings.ToLower(t.ID()), query)
+			if !titleMatch && !descMatch && !idMatch {
+				continue
+			}
 		}
 		if options.Priority != nil && t.Priority != *options.Priority {
 			continue
@@ -452,7 +473,7 @@ func ListTasks(options ListOptions) ([]*TaskWithMeta, error) {
 				continue
 			}
 		}
-		if options.Overdue && !timeutil.IsOverdue(t.DueDate, t.Status == StatusDone) {
+		if options.Overdue && !timeutil.IsOverdue(t.DueDate, IsTerminalStatus(t.Status)) {
 			continue
 		}
 
@@ -1009,7 +1030,7 @@ func CleanTasks(days int) (int, error) {
 
 	toDelete := make(map[string]bool)
 	for _, t := range tasks {
-		if t.Status == StatusDone && t.CompletedAt != nil {
+		if IsTerminalStatus(t.Status) && t.CompletedAt != nil {
 			comp, err := time.Parse(time.RFC3339Nano, *t.CompletedAt)
 			if err != nil {
 				comp, err = time.Parse(time.RFC3339, *t.CompletedAt)

@@ -2,25 +2,22 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/nijaru/tk/internal/format"
 	"github.com/nijaru/tk/internal/task"
 )
 
-type LogCmd struct {
-	ID  string   `arg:"" help:"Task ID or ref"`
-	Msg []string `arg:"" help:"Log message"`
+type CloseCmd struct {
+	ID string `arg:"" help:"Task ID or ref"`
 }
 
-func (c *LogCmd) Run(cli *CLI) error {
+func (c *CloseCmd) Run(cli *CLI) error {
 	id, err := task.ResolveID(c.ID)
 	if err != nil {
 		return err
 	}
 
-	msg := strings.Join(c.Msg, " ")
-	t, err := task.AddLog(id, msg)
+	t, err := task.UpdateTaskStatus(id, task.StatusClosed)
 	if err != nil {
 		return err
 	}
@@ -28,7 +25,7 @@ func (c *LogCmd) Run(cli *CLI) error {
 	if cli.JSON {
 		fmt.Println(format.FormatJson(t))
 	} else {
-		fmt.Printf("Logged to %s: %s\n", t.ID(), msg)
+		fmt.Printf("Closed %s: %s\n", t.ID, t.Title)
 	}
 
 	return nil

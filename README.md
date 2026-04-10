@@ -110,9 +110,10 @@ tk add "Title" --due +7d             # Relative due date (+Nh/+Nd/+Nw/+Nm)
 ## List Options
 
 ```bash
-tk list                        # List tasks (limit 20)
-tk list -a                     # Show all
-tk list -s active              # Filter by status
+tk list                        # List active/open/deferred tasks (limit 20)
+tk list database               # Search tasks for 'database'
+tk list -a                     # Show all (including done/closed)
+tk list -s done                # Filter by status
 tk list -p 1                   # Filter by priority
 tk list -P api                 # Filter by project
 tk list -l bug                 # Filter by label
@@ -179,6 +180,15 @@ tk completions zsh > "${fpath[1]}/_tk"
 ## Environment
 
 - `NO_COLOR` — Disable colored output
+
+## Storage
+
+Plain JSON files in `.tasks/` — one file per task, one config file.
+
+## License
+
+[MIT](LICENSE)
+olored output
 
 ## Storage
 

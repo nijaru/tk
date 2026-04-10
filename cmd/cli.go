@@ -18,9 +18,11 @@ type CLI struct {
 	List        LsCmd          `cmd:"" help:"List tasks"                                 aliases:"ls"`
 	Ready       ReadyCmd       `cmd:"" help:"List active/open unblocked tasks"           aliases:"rdy"`
 	Show        ShowCmd        `cmd:"" help:"Show task details"`
-	Start       StartCmd       `cmd:"" help:"Start working on a task (open → active)"`
+	Start       StartCmd       `cmd:"" help:"Start working on a task (open → active)" aliases:"active"`
+	Open        OpenCmd        `cmd:"" help:"Reset a task status to open"`
+	Defer       DeferCmd       `cmd:"" help:"Defer a task"`
 	Done        DoneCmd        `cmd:"" help:"Complete a task"`
-	Reopen      ReopenCmd      `cmd:"" help:"Reopen a completed task"`
+	Close       CloseCmd       `cmd:"" help:"Close/cancel a task"`
 	Edit        EditCmd        `cmd:"" help:"Edit a task"`
 	Log         LogCmd         `cmd:"" help:"Add a log entry to a task"`
 	Block       BlockCmd       `cmd:"" help:"Add a blocker dependency"`

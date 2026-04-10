@@ -78,15 +78,21 @@ func FormatTaskRow(t *task.TaskWithMeta) string {
 	dueSoon := !isOverdue && t.DaysUntilDue != nil && *t.DaysUntilDue <= timeutil.DueSoonThreshold
 
 	statusText := string(t.Status)
-	if t.Status == task.StatusDone && t.CompletedAt != nil {
-		statusText = fmt.Sprintf("done %s", timeutil.FormatRelative(*t.CompletedAt))
+	if task.IsTerminalStatus(t.Status) && t.CompletedAt != nil {
+		statusText = fmt.Sprintf("%s %s", t.Status, timeutil.FormatRelative(*t.CompletedAt))
 	}
 	status := fmt.Sprintf("%-12s", statusText)
 	title := truncate(t.Title, 50)
 
 	if ShouldUseColor() {
 		pc := PriorityColors[t.Priority]
+		if pc == nil {
+			pc = color.New()
+		}
 		sc := StatusColors[t.Status]
+		if sc == nil {
+			sc = color.New()
+		}
 		if isOverdue {
 			sc = OverdueColor
 		} else if dueSoon {

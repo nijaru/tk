@@ -11,9 +11,11 @@ import (
 type Status string
 
 const (
-	StatusOpen   Status = "open"
-	StatusActive Status = "active"
-	StatusDone   Status = "done"
+	StatusDeferred Status = "deferred"
+	StatusOpen     Status = "open"
+	StatusActive   Status = "active"
+	StatusDone     Status = "done"
+	StatusClosed   Status = "closed"
 )
 
 type Priority int
