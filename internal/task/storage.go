@@ -388,14 +388,14 @@ type ListOptions struct {
 	Search       string
 	HideTerminal bool
 	Status       Status
-	Priority *Priority
-	Project  string
-	Label    string
-	Assignee string
-	Parent   *string // nil means no filter, non-nil means filter by parent ID (empty string for roots)
-	Roots    bool
-	Overdue  bool
-	Limit    int
+	Priority     *Priority
+	Project      string
+	Label        string
+	Assignee     string
+	Parent       *string // nil means no filter, non-nil means filter by parent ID (empty string for roots)
+	Roots        bool
+	Overdue      bool
+	Limit        int
 }
 
 func ListTasks(options ListOptions) ([]*TaskWithMeta, error) {
@@ -425,7 +425,8 @@ func ListTasks(options ListOptions) ([]*TaskWithMeta, error) {
 		if options.Search != "" {
 			query := strings.ToLower(options.Search)
 			titleMatch := strings.Contains(strings.ToLower(t.Title), query)
-			descMatch := t.Description != nil && strings.Contains(strings.ToLower(*t.Description), query)
+			descMatch := t.Description != nil &&
+				strings.Contains(strings.ToLower(*t.Description), query)
 			idMatch := strings.Contains(strings.ToLower(t.ID()), query)
 			if !titleMatch && !descMatch && !idMatch {
 				continue
