@@ -18,6 +18,21 @@ const (
 	StatusClosed   Status = "closed"
 )
 
+// ParseStatus parses a status filter, accepting case-insensitive names.
+func ParseStatus(input string) (Status, error) {
+	switch Status(strings.ToLower(strings.TrimSpace(input))) {
+	case "":
+		return "", nil
+	case StatusDeferred, StatusOpen, StatusActive, StatusDone, StatusClosed:
+		return Status(strings.ToLower(strings.TrimSpace(input))), nil
+	default:
+		return "", fmt.Errorf(
+			"invalid status %q: use open, active, deferred, done, or closed",
+			input,
+		)
+	}
+}
+
 type Priority int
 
 const (
@@ -152,9 +167,24 @@ func (t *Task) ID() string {
 	return TaskID(t.Project, t.Ref)
 }
 
-// idPattern validates the overall ID format: one or more hyphen-separated
-// lowercase alphanumeric segments. Uses strings.LastIndex to split project/ref.
+// projectPattern validates project names used in task IDs.
+var projectPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+
+// idPattern validates the overall ID format. Uses strings.LastIndex to split
+// project/ref so project names may contain hyphens.
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$`)
+
+// ValidateProjectName validates a project name before it becomes part of a
+// task filename or ID.
+func ValidateProjectName(project string) error {
+	if !projectPattern.MatchString(project) {
+		return fmt.Errorf(
+			"invalid project name %q: use lowercase letters, digits, and internal hyphens",
+			project,
+		)
+	}
+	return nil
+}
 
 // ParseID parses "project-ref" into its components.
 // Project names may contain hyphens (e.g. "my-app-a7b3" → project="my-app", ref="a7b3").

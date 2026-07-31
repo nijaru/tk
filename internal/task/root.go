@@ -39,8 +39,11 @@ func SetWorkingDir(dir string) error {
 			}
 			if err := json.Unmarshal(data, &config); err == nil {
 				if aliasPath, ok := config.Aliases[dir]; ok {
-					// Alias path is relative to project root
-					workingDir = filepath.Join(root.Root, aliasPath)
+					if filepath.IsAbs(aliasPath) {
+						workingDir = filepath.Clean(aliasPath)
+					} else {
+						workingDir = filepath.Join(root.Root, aliasPath)
+					}
 				}
 			}
 		}

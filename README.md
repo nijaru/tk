@@ -39,7 +39,7 @@ go build -o tk .
 ```bash
 $ cd myapp
 $ tk init                               # project auto-derived from directory
-Initialized: .tasks
+Initialized empty tk project in /path/to/myapp/.tasks
 
 $ tk add Implement auth -p 1
 Created task myapp-a7b3: Implement auth
@@ -133,7 +133,8 @@ tk list -n 10                  # Limit results
 tk edit a7b3 -t "New title"    # Update title
 tk edit a7b3 -p 1              # Update priority
 tk edit a7b3 -l +urgent        # Add label
-tk edit a7b3 -l -bug           # Remove label (use --labels=-bug)
+tk edit a7b3 --remove-label bug # Remove label
+tk edit a7b3 --remove-assignee nick # Remove assignee
 tk edit a7b3 --due -           # Clear due date
 tk edit a7b3 --parent -        # Clear parent
 ```
@@ -143,7 +144,7 @@ tk edit a7b3 --parent -        # Clear parent
 ```bash
 tk config                                  # Show all config
 tk config project                          # Show default project
-tk config project set api                  # Set default project
+tk config project set api                  # Set default project (lowercase, digits, hyphens)
 tk config project rename old new           # Rename project and all its tasks
 tk config alias                            # List aliases
 tk config alias web src/web                # Add alias

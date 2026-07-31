@@ -17,11 +17,17 @@ func (c *CleanCmd) Run(cli *CLI) error {
 	var days int
 	switch {
 	case c.OlderThan != nil:
+		if *c.OlderThan < 0 {
+			return fmt.Errorf("--older-than must be non-negative")
+		}
 		days = *c.OlderThan
 	case config.CleanAfter.Enabled:
 		days = config.CleanAfter.Days
 	case c.Force:
-		return fmt.Errorf("auto-clean is disabled; use --older-than N to specify a threshold")
+		days = config.CleanAfter.Days
+		if days <= 0 {
+			days = task.DefaultConfig.CleanAfter.Days
+		}
 	default:
 		fmt.Println(
 			"Auto-clean is disabled. Use --older-than N or enable with 'tk config clean-after enable'.",

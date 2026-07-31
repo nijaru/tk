@@ -1,9 +1,11 @@
 package task
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,7 +19,53 @@ func setupTestDir(t *testing.T) string {
 	require.NoError(t, err)
 
 	SetWorkingDir(tmp)
+	t.Cleanup(func() { workingDir = "" })
 	return tmp
+}
+
+func TestCreateTaskHonorsExplicitNonePriority(t *testing.T) {
+	setupTestDir(t)
+
+	none := PriorityNone
+	created, err := CreateTask(CreateTaskOptions{
+		Title:    "No priority",
+		Project:  "proj",
+		Priority: &none,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PriorityNone, created.Priority)
+
+	_, err = os.Stat(filepath.Join(GetTasksDir(), "config.json"))
+	assert.NoError(t, err, "creating the first task should initialize config.json")
+}
+
+func TestCreateTaskRejectsInvalidInput(t *testing.T) {
+	setupTestDir(t)
+
+	_, err := CreateTask(CreateTaskOptions{Title: "   ", Project: "proj"})
+	assert.EqualError(t, err, "task title cannot be empty")
+
+	_, err = CreateTask(CreateTaskOptions{Title: "Task", Project: "Bad Name"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid project name")
+}
+
+func TestProjectNameValidation(t *testing.T) {
+	for _, name := range []string{"tk", "tk-go", "project2", "my-project-2"} {
+		assert.NoError(t, ValidateProjectName(name), name)
+	}
+	for _, name := range []string{"", "Bad", "bad_name", "bad name", "-bad", "bad-"} {
+		assert.Error(t, ValidateProjectName(name), name)
+	}
+}
+
+func TestParseStatus(t *testing.T) {
+	status, err := ParseStatus("DONE")
+	assert.NoError(t, err)
+	assert.Equal(t, StatusDone, status)
+
+	_, err = ParseStatus("bogus")
+	assert.Error(t, err)
 }
 
 func TestIDResolution(t *testing.T) {
@@ -48,12 +96,85 @@ func TestIDResolution(t *testing.T) {
 		assert.Equal(t, t1.ID, id)
 	})
 
-	t.Run("Ambiguous Match", func(t *testing.T) {
-		// This is tricky with random refs, but we can mock files if needed.
-		// For now, let's just test a "not found"
+	t.Run("Not found and reserved config", func(t *testing.T) {
 		_, err := ResolveID("nonexistent")
 		assert.Error(t, err)
+		_, err = ResolveID("config")
+		assert.Error(t, err)
 	})
+}
+
+func TestAbsoluteDirectoryAlias(t *testing.T) {
+	root := setupTestDir(t)
+	external := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(external, ".tasks"), 0o755))
+
+	config := GetConfig()
+	config.Aliases = map[string]string{"external": external}
+	require.NoError(t, SaveConfig(config))
+
+	t.Chdir(root)
+	require.NoError(t, SetWorkingDir("external"))
+	assert.Equal(t, filepath.Join(external, ".tasks"), GetTasksDir())
+}
+
+func TestCorruptTaskFilesAreVisible(t *testing.T) {
+	root := setupTestDir(t)
+	badPath := filepath.Join(root, ".tasks", "proj-bad1.json")
+	require.NoError(t, os.WriteFile(badPath, []byte("not json"), 0o644))
+
+	_, err := GetAllTasks(filepath.Join(root, ".tasks"))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "proj-bad1.json")
+
+	issues, err := CheckIntegrity()
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Contains(t, issues[0], "Task file proj-bad1.json is invalid")
+}
+
+func TestLegacyInvalidProjectTaskCanBeMovedAndUsedAsParent(t *testing.T) {
+	root := setupTestDir(t)
+	legacy := Task{
+		Project:  "Bad Name!",
+		Ref:      "abcd",
+		Title:    "Legacy",
+		Status:   StatusOpen,
+		Priority: PriorityMedium,
+		Labels:   []string{}, Assignees: []string{}, BlockedBy: []string{}, Logs: []LogEntry{},
+		CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z",
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(root, ".tasks", "Bad Name!-abcd.json"), data, 0o644),
+	)
+
+	child, err := CreateTask(CreateTaskOptions{Title: "Child", Project: "proj"})
+	require.NoError(t, err)
+	assert.NoError(t, ValidateParent("Bad Name!-abcd", child.ID))
+
+	result, err := MoveTask("Bad Name!-abcd", "proj")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-abcd", result.NewID)
+}
+
+func TestRepeatedStatusUpdateIsIdempotent(t *testing.T) {
+	setupTestDir(t)
+	created, err := CreateTask(CreateTaskOptions{Title: "Task", Project: "proj"})
+	require.NoError(t, err)
+
+	completed, err := UpdateTaskStatus(created.ID, StatusDone)
+	require.NoError(t, err)
+	recordedUpdated := completed.UpdatedAt
+	recordedCompleted := completed.CompletedAt
+	time.Sleep(2 * time.Millisecond)
+
+	repeated, err := UpdateTaskStatus(created.ID, StatusDone)
+	require.NoError(t, err)
+	assert.Equal(t, recordedUpdated, repeated.UpdatedAt)
+	assert.Equal(t, recordedCompleted, repeated.CompletedAt)
 }
 
 func TestCycleDetection(t *testing.T) {

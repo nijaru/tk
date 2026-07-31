@@ -46,6 +46,10 @@ type ConfigProjectSetCmd struct {
 }
 
 func (c *ConfigProjectSetCmd) Run(cli *CLI) error {
+	if err := task.ValidateProjectName(c.Name); err != nil {
+		return err
+	}
+
 	config, err := task.UpdateConfig(func(cfg *task.Config) {
 		cfg.Project = c.Name
 	})

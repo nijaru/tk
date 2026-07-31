@@ -25,6 +25,9 @@ func (c *InitCmd) Run(cli *CLI) error {
 			projectName = "tk"
 		}
 	}
+	if err := task.ValidateProjectName(projectName); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(root.TasksDir, 0o755); err != nil {
 		return fmt.Errorf("create .tasks directory: %w", err)

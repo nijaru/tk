@@ -12,15 +12,17 @@ import (
 )
 
 type EditCmd struct {
-	ID        string   `arg:"" help:"Task ID or ref"`
-	Title     string   `       help:"New title"                                      short:"t"`
-	Priority  string   `       help:"New priority"                                   short:"p"`
-	Labels    []string `       help:"Labels (+add, -remove, or replace)"             short:"l" sep:","`
-	Assignees []string `       help:"Assignees"                                      short:"A" sep:","`
-	Due       string   `       help:"Due date (YYYY-MM-DD, relative, or - to clear)"`
-	Parent    string   `       help:"Parent task (or - to clear)"`
-	Desc      string   `       help:"Description"                                    short:"d"`
-	Estimate  *int     `       help:"Estimate (or 0 to clear)"`
+	ID              string   `arg:"" help:"Task ID or ref"`
+	Title           string   `       help:"New title"                                                     short:"t"`
+	Priority        string   `       help:"New priority"                                                  short:"p"`
+	Labels          []string `       help:"Labels (+add, or replace; use --remove-label to remove)"       short:"l" sep:","`
+	RemoveLabels    []string `       help:"Labels to remove (CSV)"                                                  sep:"," name:"remove-label"`
+	Assignees       []string `       help:"Assignees (+add, or replace; use --remove-assignee to remove)" short:"A" sep:","`
+	RemoveAssignees []string `       help:"Assignees to remove (CSV)"                                               sep:"," name:"remove-assignee"`
+	Due             string   `       help:"Due date (YYYY-MM-DD, relative, or - to clear)"`
+	Parent          string   `       help:"Parent task (or - to clear)"`
+	Desc            string   `       help:"Description"                                                   short:"d"`
+	Estimate        *int     `       help:"Estimate (or 0 to clear)"`
 }
 
 func (c *EditCmd) Run(cli *CLI) error {
@@ -48,12 +50,15 @@ func (c *EditCmd) Run(cli *CLI) error {
 		updates.Priority = &p
 	}
 
-	if len(c.Labels) > 0 {
-		updates.Labels = applySliceUpdates(t.Labels, c.Labels)
+	if len(c.Labels) > 0 || len(c.RemoveLabels) > 0 {
+		updates.Labels = applySliceUpdates(t.Labels, appendRemovals(c.Labels, c.RemoveLabels))
 	}
 
-	if len(c.Assignees) > 0 {
-		updates.Assignees = applySliceUpdates(t.Assignees, c.Assignees)
+	if len(c.Assignees) > 0 || len(c.RemoveAssignees) > 0 {
+		updates.Assignees = applySliceUpdates(
+			t.Assignees,
+			appendRemovals(c.Assignees, c.RemoveAssignees),
+		)
 	}
 
 	if c.Due != "" {
@@ -111,6 +116,15 @@ func (c *EditCmd) Run(cli *CLI) error {
 	}
 
 	return nil
+}
+
+func appendRemovals(updates, removals []string) []string {
+	result := make([]string, 0, len(updates)+len(removals))
+	result = append(result, updates...)
+	for _, removal := range removals {
+		result = append(result, "-"+removal)
+	}
+	return result
 }
 
 func applySliceUpdates(current []string, updates []string) []string {

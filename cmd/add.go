@@ -23,13 +23,13 @@ type AddCmd struct {
 }
 
 func (c *AddCmd) Run(cli *CLI) error {
-	prio := task.PriorityNone
+	var prio *task.Priority
 	if c.Priority != "" {
 		p, err := priority.Parse(c.Priority)
 		if err != nil {
 			return err
 		}
-		prio = p
+		prio = &p
 	}
 
 	var dueDate *string

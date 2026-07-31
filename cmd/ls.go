@@ -11,26 +11,31 @@ import (
 
 type LsCmd struct {
 	Search   []string `arg:"" optional:"" help:"Search title/description"`
-	All      bool     `                   help:"Show all (including done, no limit)" short:"a"`
-	Status   string   `                   help:"Filter by status (open/active/done)" short:"s"`
-	Priority string   `                   help:"Filter by priority"                  short:"p"`
-	Project  string   `                   help:"Filter by project"                   short:"P"`
-	Label    string   `                   help:"Filter by label"                     short:"l"`
+	All      bool     `                   help:"Show all (including done, no limit)"                 short:"a"`
+	Status   string   `                   help:"Filter by status (open/active/deferred/done/closed)" short:"s"`
+	Priority string   `                   help:"Filter by priority"                                  short:"p"`
+	Project  string   `                   help:"Filter by project"                                   short:"P"`
+	Label    string   `                   help:"Filter by label"                                     short:"l"`
 	Assignee string   `                   help:"Filter by assignee"`
 	Parent   string   `                   help:"Filter by parent task"`
 	Roots    bool     `                   help:"Top-level tasks only"`
 	Overdue  bool     `                   help:"Overdue tasks only"`
-	Limit    int      `                   help:"Limit results"                       short:"n" default:"20"`
+	Limit    int      `                   help:"Limit results"                                       short:"n" default:"20"`
 }
 
 func (c *LsCmd) Run(cli *CLI) error {
+	status, err := task.ParseStatus(c.Status)
+	if err != nil {
+		return err
+	}
+
 	searchQuery := strings.Join(c.Search, " ")
-	hideTerminal := !c.All && !task.IsTerminalStatus(task.Status(c.Status))
+	hideTerminal := !c.All && !task.IsTerminalStatus(status)
 
 	opts := task.ListOptions{
 		Search:       searchQuery,
 		HideTerminal: hideTerminal,
-		Status:       task.Status(c.Status),
+		Status:       status,
 		Project:      c.Project,
 		Label:        c.Label,
 		Assignee:     c.Assignee,

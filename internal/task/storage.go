@@ -200,7 +200,7 @@ func UpdateConfig(updates func(*Config)) (Config, error) {
 type CreateTaskOptions struct {
 	Title       string
 	Description *string
-	Priority    Priority
+	Priority    *Priority
 	Project     string
 	Labels      []string
 	Assignees   []string
@@ -210,6 +210,10 @@ type CreateTaskOptions struct {
 }
 
 func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
+	if strings.TrimSpace(options.Title) == "" {
+		return nil, errors.New("task title cannot be empty")
+	}
+
 	tasksDir, err := ensureTasksDir()
 	if err != nil {
 		return nil, err
@@ -219,6 +223,18 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 	project := options.Project
 	if project == "" {
 		project = config.Project
+	}
+	if err := ValidateProjectName(project); err != nil {
+		return nil, err
+	}
+
+	configPath := getConfigPath(tasksDir)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := SaveConfig(config); err != nil {
+			return nil, fmt.Errorf("initialize config: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("check config: %w", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -232,9 +248,9 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 		}
 		id := TaskID(project, ref)
 
-		priority := options.Priority
-		if priority == 0 {
-			priority = config.Defaults.Priority
+		priority := config.Defaults.Priority
+		if options.Priority != nil {
+			priority = *options.Priority
 		}
 
 		labels := options.Labels
@@ -294,12 +310,21 @@ func writeTaskFileExclusive(path string, task *Task) error {
 	}
 
 	if _, err = f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
 		_ = os.Remove(path)
-		return err
+		return fmt.Errorf("write task: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("sync task: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close task: %w", err)
 	}
 
-	return f.Close()
+	return nil
 }
 
 func GetTask(id string) (*TaskWithMeta, *CleanupInfo, error) {
@@ -341,6 +366,10 @@ func ReadTaskFile(path string) (*Task, error) {
 }
 
 func SaveTask(task *Task) error {
+	if !isSafeTaskID(task.ID()) {
+		return fmt.Errorf("invalid task ID: %s", task.ID())
+	}
+
 	root := FindRoot()
 	if !root.Exists {
 		return &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
@@ -359,6 +388,9 @@ func EnrichTask(task *Task, statusMap map[string]Status) *TaskWithMeta {
 	blockedByIncomplete := false
 
 	for _, blockerID := range task.BlockedBy {
+		if !isSafeTaskID(blockerID) {
+			continue
+		}
 		status, ok := statusMap[blockerID]
 		if !ok {
 			t, err := ReadTaskFile(getTaskPath(root.TasksDir, blockerID))
@@ -509,9 +541,10 @@ func GetAllTasks(tasksDir string) ([]*Task, error) {
 		}
 
 		task, err := ReadTaskFile(filepath.Join(tasksDir, entry.Name()))
-		if err == nil {
-			tasks = append(tasks, task)
+		if err != nil {
+			return nil, fmt.Errorf("read task file %s: %w", entry.Name(), err)
 		}
+		tasks = append(tasks, task)
 	}
 	return tasks, nil
 }
@@ -524,6 +557,9 @@ func UpdateTaskStatus(id string, status Status) (*TaskWithMeta, error) {
 	task, err := ReadTaskFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if task.Status == status {
+		return EnrichTask(task, nil), nil
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -624,6 +660,10 @@ func UpdateTask(id string, updates UpdateTaskOptions) (*TaskWithMeta, error) {
 }
 
 func DeleteTask(id string) error {
+	if !isSafeTaskID(id) {
+		return fmt.Errorf("invalid task ID: %s", id)
+	}
+
 	root := FindRoot()
 	path := getTaskPath(root.TasksDir, id)
 
@@ -633,7 +673,7 @@ func DeleteTask(id string) error {
 
 	allTasks, err := GetAllTasks(root.TasksDir)
 	if err != nil {
-		return nil // Non-critical
+		return fmt.Errorf("update references after deleting %s: %w", id, err)
 	}
 
 	for _, t := range allTasks {
@@ -655,7 +695,9 @@ func DeleteTask(id string) error {
 		}
 
 		if modified {
-			_ = SaveTask(t)
+			if err := SaveTask(t); err != nil {
+				return fmt.Errorf("update references after deleting %s: %w", id, err)
+			}
 		}
 	}
 
@@ -670,9 +712,12 @@ func ResolveID(input string) (string, error) {
 		return "", &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
 	}
 
-	// 1. Literal match
-	if _, err := os.Stat(getTaskPath(root.TasksDir, input)); err == nil {
-		return input, nil
+	// 1. Literal match. Restrict direct paths to a single filename so an ID
+	// cannot escape .tasks through path traversal.
+	if isSafeTaskID(input) {
+		if _, err := os.Stat(getTaskPath(root.TasksDir, input)); err == nil {
+			return input, nil
+		}
 	}
 
 	// 2. Prefix matching
@@ -712,6 +757,11 @@ func ResolveID(input string) (string, error) {
 	return "", fmt.Errorf("task not found: %s", input)
 }
 
+func isSafeTaskID(id string) bool {
+	return id != "" && id != "." && id != ".." && id != "config" &&
+		filepath.Base(id) == id && !strings.ContainsAny(id, `/\\`)
+}
+
 // --- Renames ---
 
 type RenameResult struct {
@@ -720,6 +770,13 @@ type RenameResult struct {
 }
 
 func RenameProject(oldName, newName string) (*RenameResult, error) {
+	if err := ValidateProjectName(newName); err != nil {
+		return nil, err
+	}
+	if oldName == newName {
+		return nil, fmt.Errorf("project %q is already named that", oldName)
+	}
+
 	root := FindRoot()
 	if !root.Exists {
 		return nil, &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
@@ -759,6 +816,9 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 	res := &RenameResult{Renamed: make([]string, 0, len(toRename))}
 
 	for _, t := range allTasks {
+		if !isSafeTaskID(t.ID()) {
+			return nil, fmt.Errorf("invalid task ID in project rename: %s", t.ID())
+		}
 		modified := false
 
 		for i, b := range t.BlockedBy {
@@ -798,7 +858,9 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 	config := GetConfig()
 	if config.Project == oldName {
 		config.Project = newName
-		_ = SaveConfig(config)
+		if err := SaveConfig(config); err != nil {
+			return nil, fmt.Errorf("update project config: %w", err)
+		}
 	}
 
 	return res, nil
@@ -811,18 +873,16 @@ type MoveResult struct {
 }
 
 func MoveTask(id, newProject string) (*MoveResult, error) {
-	root := FindRoot()
-	if !root.Exists {
-		return nil, &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
+	if err := ValidateProjectName(newProject); err != nil {
+		return nil, err
 	}
-
-	proj, ref, ok := ParseID(id)
-	if !ok {
+	if !isSafeTaskID(id) {
 		return nil, fmt.Errorf("invalid task ID: %s", id)
 	}
 
-	if proj == newProject {
-		return nil, fmt.Errorf("task %s is already in project %q", id, newProject)
+	root := FindRoot()
+	if !root.Exists {
+		return nil, &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
 	}
 
 	oldPath := getTaskPath(root.TasksDir, id)
@@ -831,7 +891,14 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 		return nil, fmt.Errorf("task not found: %s", id)
 	}
 
-	newID := TaskID(newProject, ref)
+	if task.Project == newProject {
+		return nil, fmt.Errorf("task %s is already in project %q", id, newProject)
+	}
+
+	newID := TaskID(newProject, task.Ref)
+	if !isSafeTaskID(newID) {
+		return nil, fmt.Errorf("invalid task ID: %s", newID)
+	}
 	newPath := getTaskPath(root.TasksDir, newID)
 	if _, err := os.Stat(newPath); err == nil {
 		return nil, fmt.Errorf("cannot move: %q already exists", newID)
@@ -850,23 +917,26 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 	res := &MoveResult{OldID: id, NewID: newID}
 
 	allTasks, err := GetAllTasks(root.TasksDir)
-	if err == nil {
-		for _, t := range allTasks {
-			modified := false
-			for i, b := range t.BlockedBy {
-				if b == id {
-					t.BlockedBy[i] = newID
-					res.ReferencesUpdated++
-					modified = true
-				}
-			}
-			if t.Parent != nil && *t.Parent == id {
-				t.Parent = &newID
+	if err != nil {
+		return nil, fmt.Errorf("update references after moving %s: %w", id, err)
+	}
+	for _, t := range allTasks {
+		modified := false
+		for i, b := range t.BlockedBy {
+			if b == id {
+				t.BlockedBy[i] = newID
 				res.ReferencesUpdated++
 				modified = true
 			}
-			if modified {
-				_ = SaveTask(t)
+		}
+		if t.Parent != nil && *t.Parent == id {
+			t.Parent = &newID
+			res.ReferencesUpdated++
+			modified = true
+		}
+		if modified {
+			if err := SaveTask(t); err != nil {
+				return nil, fmt.Errorf("update references after moving %s: %w", id, err)
 			}
 		}
 	}
@@ -877,6 +947,10 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 // --- Cycles ---
 
 func WouldCreateBlockCycle(taskId, blockerId string) bool {
+	if !isSafeTaskID(taskId) || !isSafeTaskID(blockerId) {
+		return false
+	}
+
 	root := FindRoot()
 	visited := make(map[string]bool)
 	stack := []string{blockerId}
@@ -892,6 +966,9 @@ func WouldCreateBlockCycle(taskId, blockerId string) bool {
 			continue
 		}
 		visited[current] = true
+		if !isSafeTaskID(current) {
+			continue
+		}
 
 		task, err := ReadTaskFile(getTaskPath(root.TasksDir, current))
 		if err == nil {
@@ -902,6 +979,10 @@ func WouldCreateBlockCycle(taskId, blockerId string) bool {
 }
 
 func WouldCreateParentCycle(taskId, parentId string) bool {
+	if !isSafeTaskID(taskId) || !isSafeTaskID(parentId) {
+		return false
+	}
+
 	root := FindRoot()
 	visited := make(map[string]bool)
 	current := parentId
@@ -914,6 +995,9 @@ func WouldCreateParentCycle(taskId, parentId string) bool {
 			return true
 		}
 		visited[current] = true
+		if !isSafeTaskID(current) {
+			break
+		}
 
 		task, err := ReadTaskFile(getTaskPath(root.TasksDir, current))
 		if err != nil || task.Parent == nil {
@@ -925,7 +1009,7 @@ func WouldCreateParentCycle(taskId, parentId string) bool {
 }
 
 func ValidateParent(parentId, currentTaskId string) error {
-	if _, _, ok := ParseID(parentId); !ok {
+	if !isSafeTaskID(parentId) {
 		return fmt.Errorf("invalid parent ID format: %s", parentId)
 	}
 
@@ -934,8 +1018,15 @@ func ValidateParent(parentId, currentTaskId string) error {
 	}
 
 	root := FindRoot()
-	if _, err := os.Stat(getTaskPath(root.TasksDir, parentId)); os.IsNotExist(err) {
-		return fmt.Errorf("parent task not found: %s", parentId)
+	parentTask, err := ReadTaskFile(getTaskPath(root.TasksDir, parentId))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("parent task not found: %s", parentId)
+		}
+		return fmt.Errorf("check parent task %s: %w", parentId, err)
+	}
+	if parentTask.ID() != parentId {
+		return fmt.Errorf("parent task ID mismatch: %s", parentId)
 	}
 
 	if currentTaskId != "" && WouldCreateParentCycle(currentTaskId, parentId) {
@@ -970,19 +1061,25 @@ func CleanTaskOrphans(task *Task, expectedID, tasksDir string) *CleanupInfo {
 
 	var validBlockers []string
 	for _, b := range task.BlockedBy {
-		if _, err := os.Stat(getTaskPath(tasksDir, b)); err == nil {
-			validBlockers = append(validBlockers, b)
-		} else {
-			cleanup.OrphanedBlockers = append(cleanup.OrphanedBlockers, b)
-			modified = true
+		if isSafeTaskID(b) {
+			if _, err := os.Stat(getTaskPath(tasksDir, b)); err == nil {
+				validBlockers = append(validBlockers, b)
+				continue
+			}
 		}
+		cleanup.OrphanedBlockers = append(cleanup.OrphanedBlockers, b)
+		modified = true
 	}
 	if len(cleanup.OrphanedBlockers) > 0 {
 		task.BlockedBy = validBlockers
 	}
 
 	if task.Parent != nil {
-		if _, err := os.Stat(getTaskPath(tasksDir, *task.Parent)); os.IsNotExist(err) {
+		if !isSafeTaskID(*task.Parent) {
+			cleanup.OrphanedParent = *task.Parent
+			task.Parent = nil
+			modified = true
+		} else if _, err := os.Stat(getTaskPath(tasksDir, *task.Parent)); os.IsNotExist(err) {
 			cleanup.OrphanedParent = *task.Parent
 			task.Parent = nil
 			modified = true
@@ -1020,6 +1117,10 @@ func (c *CleanupInfo) Message(id string) string {
 }
 
 func CleanTasks(days int) (int, error) {
+	if days < 0 {
+		return 0, fmt.Errorf("clean threshold must be non-negative")
+	}
+
 	root := FindRoot()
 	tasks, err := GetAllTasks(root.TasksDir)
 	if err != nil {
@@ -1031,6 +1132,9 @@ func CleanTasks(days int) (int, error) {
 
 	toDelete := make(map[string]bool)
 	for _, t := range tasks {
+		if !isSafeTaskID(t.ID()) {
+			return 0, fmt.Errorf("invalid task ID: %s", t.ID())
+		}
 		if IsTerminalStatus(t.Status) && t.CompletedAt != nil {
 			comp, err := time.Parse(time.RFC3339Nano, *t.CompletedAt)
 			if err != nil {
@@ -1043,7 +1147,9 @@ func CleanTasks(days int) (int, error) {
 	}
 
 	for id := range toDelete {
-		_ = os.Remove(getTaskPath(root.TasksDir, id))
+		if err := os.Remove(getTaskPath(root.TasksDir, id)); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("remove task %s: %w", id, err)
+		}
 	}
 
 	// Update references in surviving tasks in one pass.
@@ -1068,7 +1174,9 @@ func CleanTasks(days int) (int, error) {
 			modified = true
 		}
 		if modified {
-			_ = SaveTask(t)
+			if err := SaveTask(t); err != nil {
+				return 0, fmt.Errorf("update references after cleaning: %w", err)
+			}
 		}
 	}
 
@@ -1129,14 +1237,38 @@ func AddLog(id, msg string) (*Task, error) {
 
 func CheckIntegrity() ([]string, error) {
 	root := FindRoot()
-	tasks, err := GetAllTasks(root.TasksDir)
+	entries, err := os.ReadDir(root.TasksDir)
 	if err != nil {
 		return nil, err
 	}
 
 	var issues []string
+	var tasks []*Task
 	idMap := make(map[string]bool)
-	for _, t := range tasks {
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") ||
+			entry.Name() == "config.json" {
+			continue
+		}
+
+		t, err := ReadTaskFile(filepath.Join(root.TasksDir, entry.Name()))
+		if err != nil {
+			issues = append(issues, fmt.Sprintf("Task file %s is invalid: %v", entry.Name(), err))
+			continue
+		}
+		expectedID := strings.TrimSuffix(entry.Name(), ".json")
+		if err := ValidateProjectName(t.Project); err != nil {
+			issues = append(
+				issues,
+				fmt.Sprintf("Task %s has invalid project name: %v", t.ID(), err),
+			)
+		}
+		if t.ID() != expectedID {
+			issues = append(issues, fmt.Sprintf(
+				"Task file %s contains task ID %s", entry.Name(), t.ID(),
+			))
+		}
+		tasks = append(tasks, t)
 		idMap[t.ID()] = true
 	}
 

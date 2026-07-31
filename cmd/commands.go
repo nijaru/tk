@@ -25,7 +25,7 @@ func (c *CompletionsCmd) Run(cli *CLI) error {
 const fishCompletion = `# tk shell completions for fish
 # Install: tk completions fish > ~/.config/fish/completions/tk.fish
 
-set -l commands init add list ready show start open done edit log block unblock remove clean check config mv completions
+set -l commands init add list ls ready rdy show start active open defer done close edit log block unblock remove rm clean check config mv completions
 
 complete -c tk -f
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -s h -l help    -d 'Show help'
@@ -36,16 +36,22 @@ complete -c tk -n "not __fish_seen_subcommand_from $commands" -s C -l dir  -r -d
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a init        -d 'Initialize .tasks/ in current directory'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a add         -d 'Create a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a list        -d 'List tasks'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a ls          -d 'List tasks (alias)'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a ready       -d 'List active/open unblocked tasks'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a rdy         -d 'List ready tasks (alias)'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a show        -d 'Show task details'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a start       -d 'Start working on a task'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a active      -d 'Start working on a task (alias)'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a open        -d 'Reset a task status to open'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a defer       -d 'Defer a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a done        -d 'Complete a task'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a close       -d 'Close/cancel a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a edit        -d 'Edit a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a log         -d 'Add a log entry to a task'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a block       -d 'Add a blocker dependency'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a unblock     -d 'Remove a blocker dependency'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a remove      -d 'Delete a task'
+complete -c tk -n "not __fish_seen_subcommand_from $commands" -a rm          -d 'Delete a task (alias)'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a clean       -d 'Remove old completed tasks'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a check       -d 'Check task integrity'
 complete -c tk -n "not __fish_seen_subcommand_from $commands" -a config      -d 'Show or set configuration'
@@ -59,7 +65,7 @@ const bashCompletion = `# tk shell completions for bash
 _tk() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local commands="init add list ready show start open done edit log block unblock remove clean check config mv completions"
+    local commands="init add list ls ready rdy show start active open defer done close edit log block unblock remove rm clean check config mv completions"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -96,9 +102,12 @@ _tk() {
                 'init:Initialize .tasks/ in current directory'
                 'add:Create a task'
                 'list:List tasks'
+                'ls:List tasks (alias)'
                 'ready:List active/open unblocked tasks'
+                'rdy:List ready tasks (alias)'
                 'show:Show task details'
                 'start:Start working on a task'
+                'active:Start working on a task (alias)'
                 'open:Reset a task status to open'
                 'defer:Defer a task'
                 'done:Complete a task'
@@ -108,6 +117,7 @@ _tk() {
                 'block:Add a blocker dependency'
                 'unblock:Remove a blocker dependency'
                 'remove:Delete a task'
+                'rm:Delete a task (alias)'
                 'clean:Remove old completed tasks'
                 'check:Check task integrity'
                 'config:Show or set configuration'
