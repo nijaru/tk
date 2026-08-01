@@ -29,7 +29,7 @@ archives:
       - goos: windows
         formats: ["zip"]
 
-homebrews:
+brews:
   - name: tk
     directory: Formula
     repository:
