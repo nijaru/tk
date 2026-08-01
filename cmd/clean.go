@@ -12,7 +12,10 @@ type CleanCmd struct {
 }
 
 func (c *CleanCmd) Run(cli *CLI) error {
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 
 	var days int
 	switch {

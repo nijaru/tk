@@ -215,6 +215,27 @@ func TestLegacyInvalidProjectTaskCanBeMovedAndUsedAsParent(t *testing.T) {
 	assert.Equal(t, "proj-abcd", result.NewID)
 }
 
+func TestClosedBlockerDoesNotBlockTask(t *testing.T) {
+	root := setupTestDir(t)
+	defer os.RemoveAll(root)
+
+	blocker, err := CreateTask(CreateTaskOptions{Title: "Blocker", Project: "proj"})
+	require.NoError(t, err)
+	blocked, err := CreateTask(CreateTaskOptions{Title: "Blocked", Project: "proj"})
+	require.NoError(t, err)
+
+	_, err = UpdateTaskStatus(blocker.ID, StatusClosed)
+	require.NoError(t, err)
+	blockedTask, err := ReadTaskFile(filepath.Join(root, ".tasks", blocked.ID+".json"))
+	require.NoError(t, err)
+	blockedTask.BlockedBy = []string{blocker.ID}
+	require.NoError(t, SaveTask(blockedTask))
+
+	withMeta, _, err := GetTask(blocked.ID)
+	require.NoError(t, err)
+	assert.False(t, withMeta.BlockedByIncomplete)
+}
+
 func TestRepeatedStatusUpdateIsIdempotent(t *testing.T) {
 	setupTestDir(t)
 	created, err := CreateTask(CreateTaskOptions{Title: "Task", Project: "proj"})

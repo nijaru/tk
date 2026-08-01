@@ -18,7 +18,10 @@ type ConfigCmd struct {
 type ConfigShowCmd struct{}
 
 func (c *ConfigShowCmd) Run(cli *CLI) error {
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 	if cli.JSON {
 		fmt.Println(format.FormatJson(config))
 	} else {
@@ -36,7 +39,10 @@ type ConfigProjectCmd struct {
 type ConfigProjectShowCmd struct{}
 
 func (c *ConfigProjectShowCmd) Run(cli *CLI) error {
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Default project: %s\n", config.Project)
 	return nil
 }
@@ -115,7 +121,10 @@ func (c *ConfigAliasCmd) Run(cli *CLI) error {
 		}
 	}
 
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 	if len(config.Aliases) == 0 {
 		fmt.Println("No aliases configured.")
 		return nil
@@ -138,7 +147,10 @@ type ConfigDefaultsCmd struct {
 type ConfigDefaultsShowCmd struct{}
 
 func (c *ConfigDefaultsShowCmd) Run(cli *CLI) error {
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 	fmt.Println("Defaults:")
 	fmt.Printf("  Priority:  %d\n", config.Defaults.Priority)
 	fmt.Printf("  Labels:    %v\n", config.Defaults.Labels)
@@ -192,7 +204,10 @@ type ConfigCleanAfterCmd struct {
 type ConfigCleanAfterShowCmd struct{}
 
 func (c *ConfigCleanAfterShowCmd) Run(cli *CLI) error {
-	config := task.GetConfig()
+	config, err := task.LoadConfig()
+	if err != nil {
+		return err
+	}
 	status := "disabled"
 	if config.CleanAfter.Enabled {
 		status = "enabled"

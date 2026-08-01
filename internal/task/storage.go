@@ -87,12 +87,17 @@ var statusOrder = map[Status]int{
 
 // IsTerminalStatus returns true if the status is done or closed.
 func IsTerminalStatus(s Status) bool {
-	return s == StatusDone || s == StatusClosed
+	switch normalizeTaskStatus(s) {
+	case StatusDone, StatusClosed:
+		return true
+	default:
+		return false
+	}
 }
 
 func compareTasks(a, b *Task) int {
-	sa := statusOrder[a.Status]
-	sb := statusOrder[b.Status]
+	sa := statusOrder[normalizeTaskStatus(a.Status)]
+	sb := statusOrder[normalizeTaskStatus(b.Status)]
 	if sa != sb {
 		return cmp.Compare(sa, sb)
 	}
@@ -155,20 +160,34 @@ func compareTasks(a, b *Task) int {
 
 // --- Config Operations ---
 
-func GetConfig() Config {
+// LoadConfig reads the project config without falling back on parse errors.
+func LoadConfig() (Config, error) {
 	root := FindRoot()
 	configPath := getConfigPath(root.TasksDir)
 
 	data, err := os.ReadFile(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return DefaultConfig, nil
+	}
 	if err != nil {
-		return DefaultConfig
+		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 
 	config := DefaultConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return DefaultConfig
+		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 
+	return config, nil
+}
+
+// GetConfig returns the current config for read-only callers. Mutating paths
+// use LoadConfig directly so malformed config cannot be replaced by defaults.
+func GetConfig() Config {
+	config, err := LoadConfig()
+	if err != nil {
+		return DefaultConfig
+	}
 	return config
 }
 
@@ -187,7 +206,10 @@ func SaveConfig(config Config) error {
 }
 
 func UpdateConfig(updates func(*Config)) (Config, error) {
-	config := GetConfig()
+	config, err := LoadConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	updates(&config)
 	if err := SaveConfig(config); err != nil {
 		return config, err
@@ -219,7 +241,10 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 		return nil, err
 	}
 
-	config := GetConfig()
+	config, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
 	project := options.Project
 	if project == "" {
 		project = config.Project
@@ -298,8 +323,18 @@ func CreateTask(options CreateTaskOptions) (*TaskWithMeta, error) {
 	return nil, fmt.Errorf("failed to create task after %d attempts", maxRetries)
 }
 
+func marshalTask(task *Task) ([]byte, error) {
+	normalized := *task
+	normalized.Status = normalizeTaskStatus(normalized.Status)
+	data, err := json.MarshalIndent(&normalized, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, task.unknownFields)
+}
+
 func writeTaskFileExclusive(path string, task *Task) error {
-	data, err := json.MarshalIndent(task, "", "  ")
+	data, err := marshalTask(task)
 	if err != nil {
 		return err
 	}
@@ -338,7 +373,10 @@ func GetTask(id string) (*TaskWithMeta, *CleanupInfo, error) {
 		return nil, nil, err
 	}
 
-	cleanup := CleanTaskOrphans(task, id, root.TasksDir)
+	cleanup, err := CleanTaskOrphans(task, id, root.TasksDir)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Pre-build statusMap to avoid N+1 reads in EnrichTask.
 	statusMap := make(map[string]Status, len(task.BlockedBy))
@@ -361,6 +399,14 @@ func ReadTaskFile(path string) (*Task, error) {
 	if err := json.Unmarshal(data, &task); err != nil {
 		return nil, fmt.Errorf("parse task: %w", err)
 	}
+	unknown, err := captureUnknownJSONFields(data, taskJSONFields)
+	if err != nil {
+		return nil, fmt.Errorf("parse task fields: %w", err)
+	}
+	task.unknownFields = unknown
+	normalizedStatus := normalizeTaskStatus(task.Status)
+	task.statusNeedsMigration = normalizedStatus != task.Status
+	task.Status = normalizedStatus
 
 	return &task, nil
 }
@@ -375,12 +421,16 @@ func SaveTask(task *Task) error {
 		return &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
 	}
 
-	data, err := json.MarshalIndent(task, "", "  ")
+	data, err := marshalTask(task)
 	if err != nil {
 		return err
 	}
 
-	return atomicWrite(getTaskPath(root.TasksDir, task.ID()), data)
+	if err := atomicWrite(getTaskPath(root.TasksDir, task.ID()), data); err != nil {
+		return err
+	}
+	task.statusNeedsMigration = false
+	return nil
 }
 
 func EnrichTask(task *Task, statusMap map[string]Status) *TaskWithMeta {
@@ -399,7 +449,7 @@ func EnrichTask(task *Task, statusMap map[string]Status) *TaskWithMeta {
 			}
 		}
 
-		if status != "" && status != StatusDone {
+		if status != "" && !IsTerminalStatus(status) {
 			blockedByIncomplete = true
 			break
 		}
@@ -559,6 +609,12 @@ func UpdateTaskStatus(id string, status Status) (*TaskWithMeta, error) {
 		return nil, err
 	}
 	if task.Status == status {
+		if task.statusNeedsMigration {
+			if err := SaveTask(task); err != nil {
+				return nil, err
+			}
+			task.statusNeedsMigration = false
+		}
 		return EnrichTask(task, nil), nil
 	}
 
@@ -782,6 +838,11 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 		return nil, &ErrTasksNotFound{SearchedFrom: GetWorkingDir()}
 	}
 
+	config, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+
 	allTasks, err := GetAllTasks(root.TasksDir)
 	if err != nil {
 		return nil, err
@@ -840,13 +901,16 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 		if t.Project == oldName {
 			oldPath := getTaskPath(root.TasksDir, t.ID())
 			t.Project = newName
+			newPath := getTaskPath(root.TasksDir, t.ID())
 			res.Renamed = append(res.Renamed, t.ID())
 
-			if err := SaveTask(t); err != nil {
-				return nil, err
+			// Move the existing file first so a later write failure cannot leave
+			// both the old and new IDs in the task store.
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return nil, fmt.Errorf("move task file %s: %w", oldPath, err)
 			}
-			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-				return nil, fmt.Errorf("remove old task file %s: %w", oldPath, err)
+			if err := SaveTask(t); err != nil {
+				return nil, fmt.Errorf("update moved task %s: %w", t.ID(), err)
 			}
 		} else if modified {
 			if err := SaveTask(t); err != nil {
@@ -855,7 +919,6 @@ func RenameProject(oldName, newName string) (*RenameResult, error) {
 		}
 	}
 
-	config := GetConfig()
 	if config.Project == oldName {
 		config.Project = newName
 		if err := SaveConfig(config); err != nil {
@@ -907,11 +970,14 @@ func MoveTask(id, newProject string) (*MoveResult, error) {
 	task.Project = newProject
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
-	if err := SaveTask(task); err != nil {
-		return nil, err
+	// Rename first so the old and new IDs cannot coexist if rewriting the
+	// moved task fails. The moved file remains valid and is repairable by the
+	// normal ID-mismatch cleanup path.
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return nil, fmt.Errorf("move task file: %w", err)
 	}
-	if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove old task file: %w", err)
+	if err := SaveTask(task); err != nil {
+		return nil, fmt.Errorf("update moved task %s: %w", task.ID(), err)
 	}
 
 	res := &MoveResult{OldID: id, NewID: newID}
@@ -1044,7 +1110,7 @@ type CleanupInfo struct {
 	IDMismatch       *struct{ Was, Fixed string }
 }
 
-func CleanTaskOrphans(task *Task, expectedID, tasksDir string) *CleanupInfo {
+func CleanTaskOrphans(task *Task, expectedID, tasksDir string) (*CleanupInfo, error) {
 	cleanup := &CleanupInfo{}
 	modified := false
 
@@ -1088,14 +1154,16 @@ func CleanTaskOrphans(task *Task, expectedID, tasksDir string) *CleanupInfo {
 
 	if modified {
 		task.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		_ = SaveTask(task)
+		if err := SaveTask(task); err != nil {
+			return nil, fmt.Errorf("repair task %s: %w", expectedID, err)
+		}
 	}
 
 	if len(cleanup.OrphanedBlockers) == 0 && cleanup.OrphanedParent == "" &&
 		cleanup.IDMismatch == nil {
-		return nil
+		return nil, nil
 	}
-	return cleanup
+	return cleanup, nil
 }
 
 func (c *CleanupInfo) Message(id string) string {

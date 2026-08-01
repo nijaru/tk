@@ -64,6 +64,12 @@ var PriorityFromName = map[string]Priority{
 type LogEntry struct {
 	Ts  string `json:"ts"`
 	Msg string `json:"msg"`
+
+	unknownFields map[string]json.RawMessage
+}
+
+var logEntryJSONFields = map[string]struct{}{
+	"ts": {}, "msg": {},
 }
 
 // UnmarshalJSON accepts both the current structured log entries and the
@@ -78,10 +84,15 @@ func (l *LogEntry) UnmarshalJSON(data []byte) error {
 	switch data[0] {
 	case '{':
 		type logEntry LogEntry
-		var entry logEntry
+		entry := logEntry(*l)
 		if err := json.Unmarshal(data, &entry); err != nil {
 			return err
 		}
+		unknown, err := captureUnknownJSONFields(data, logEntryJSONFields)
+		if err != nil {
+			return err
+		}
+		entry.unknownFields = unknown
 		*l = LogEntry(entry)
 		return nil
 	case '"':
@@ -99,6 +110,15 @@ func (l *LogEntry) UnmarshalJSON(data []byte) error {
 	}
 
 	return fmt.Errorf("log entry must be an object or string")
+}
+
+func (l LogEntry) MarshalJSON() ([]byte, error) {
+	type logEntry LogEntry
+	data, err := json.Marshal(logEntry(l))
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, l.unknownFields)
 }
 
 var legacyLogTimestampLayouts = [...]string{
@@ -135,16 +155,109 @@ func parseLegacyLog(value string) LogEntry {
 	return LogEntry{Msg: value}
 }
 
+// captureUnknownJSONFields retains fields introduced by a newer writer so a
+// read-modify-write cycle does not erase data this version does not understand.
+func captureUnknownJSONFields(data []byte, known map[string]struct{}) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key := range known {
+		delete(fields, key)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	return fields, nil
+}
+
+func mergeUnknownJSONFields(data []byte, unknown map[string]json.RawMessage) ([]byte, error) {
+	if len(unknown) == 0 {
+		return data, nil
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range unknown {
+		if _, exists := fields[key]; !exists {
+			fields[key] = value
+		}
+	}
+	return json.MarshalIndent(fields, "", "  ")
+}
+
 type ExternalLink struct {
 	Number   *int    `json:"number,omitempty"`
 	Repo     *string `json:"repo,omitempty"`
 	SyncedAt *string `json:"synced_at,omitempty"`
+
+	unknownFields map[string]json.RawMessage
+}
+
+var externalLinkJSONFields = map[string]struct{}{
+	"number": {}, "repo": {}, "synced_at": {},
+}
+
+func (l *ExternalLink) UnmarshalJSON(data []byte) error {
+	type externalLink ExternalLink
+	decoded := externalLink(*l)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSONFields(data, externalLinkJSONFields)
+	if err != nil {
+		return err
+	}
+	decoded.unknownFields = unknown
+	*l = ExternalLink(decoded)
+	return nil
+}
+
+func (l ExternalLink) MarshalJSON() ([]byte, error) {
+	type externalLink ExternalLink
+	data, err := json.Marshal(externalLink(l))
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, l.unknownFields)
 }
 
 type External struct {
 	GitHub *ExternalLink `json:"github,omitempty"`
 	Linear *ExternalLink `json:"linear,omitempty"`
 	Jira   *ExternalLink `json:"jira,omitempty"`
+
+	unknownFields map[string]json.RawMessage
+}
+
+var externalJSONFields = map[string]struct{}{
+	"github": {}, "linear": {}, "jira": {},
+}
+
+func (e *External) UnmarshalJSON(data []byte) error {
+	type external External
+	decoded := external(*e)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSONFields(data, externalJSONFields)
+	if err != nil {
+		return err
+	}
+	decoded.unknownFields = unknown
+	*e = External(decoded)
+	return nil
+}
+
+func (e External) MarshalJSON() ([]byte, error) {
+	type external External
+	data, err := json.Marshal(external(e))
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, e.unknownFields)
 }
 
 type Task struct {
@@ -165,6 +278,9 @@ type Task struct {
 	UpdatedAt   string     `json:"updated_at"`
 	CompletedAt *string    `json:"completed_at"`
 	External    External   `json:"external"`
+
+	unknownFields        map[string]json.RawMessage
+	statusNeedsMigration bool
 }
 
 type TaskWithMeta struct {
@@ -189,7 +305,8 @@ func (c CleanAfter) MarshalJSON() ([]byte, error) {
 }
 
 func (c *CleanAfter) UnmarshalJSON(data []byte) error {
-	if string(data) == "false" {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("false")) {
 		c.Enabled = false
 		c.Days = 0
 		return nil
@@ -202,6 +319,8 @@ type ConfigDefaults struct {
 	Priority  Priority `json:"priority"`
 	Labels    []string `json:"labels"`
 	Assignees []string `json:"assignees"`
+
+	unknownFields map[string]json.RawMessage
 }
 
 type Config struct {
@@ -210,6 +329,73 @@ type Config struct {
 	Defaults   ConfigDefaults    `json:"defaults"`
 	CleanAfter CleanAfter        `json:"clean_after"`
 	Aliases    map[string]string `json:"aliases,omitempty"`
+
+	unknownFields map[string]json.RawMessage
+}
+
+var taskJSONFields = map[string]struct{}{
+	"project": {}, "ref": {}, "title": {}, "description": {}, "status": {},
+	"priority": {}, "labels": {}, "assignees": {}, "parent": {}, "blocked_by": {},
+	"estimate": {}, "due_date": {}, "logs": {}, "created_at": {}, "updated_at": {},
+	"completed_at": {}, "external": {},
+}
+
+var configDefaultsJSONFields = map[string]struct{}{
+	"priority": {}, "labels": {}, "assignees": {},
+}
+
+var configJSONFields = map[string]struct{}{
+	"version": {}, "project": {}, "defaults": {}, "clean_after": {}, "aliases": {},
+}
+
+func (d *ConfigDefaults) UnmarshalJSON(data []byte) error {
+	type configDefaults ConfigDefaults
+	decoded := configDefaults(*d)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*d = ConfigDefaults(decoded)
+
+	unknown, err := captureUnknownJSONFields(data, configDefaultsJSONFields)
+	if err != nil {
+		return err
+	}
+	d.unknownFields = unknown
+	return nil
+}
+
+func (d ConfigDefaults) MarshalJSON() ([]byte, error) {
+	type configDefaults ConfigDefaults
+	data, err := json.Marshal(configDefaults(d))
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, d.unknownFields)
+}
+
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type config Config
+	decoded := config(*c)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = Config(decoded)
+
+	unknown, err := captureUnknownJSONFields(data, configJSONFields)
+	if err != nil {
+		return err
+	}
+	c.unknownFields = unknown
+	return nil
+}
+
+func (c Config) MarshalJSON() ([]byte, error) {
+	type config Config
+	data, err := json.Marshal(config(c))
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnknownJSONFields(data, c.unknownFields)
 }
 
 var DefaultConfig = Config{
@@ -221,6 +407,20 @@ var DefaultConfig = Config{
 		Assignees: []string{},
 	},
 	CleanAfter: CleanAfter{Enabled: true, Days: 14},
+}
+
+func normalizeTaskStatus(status Status) Status {
+	normalized := strings.ToLower(strings.TrimSpace(string(status)))
+	switch normalized {
+	case string(StatusDeferred), string(StatusOpen), string(StatusActive), string(StatusDone), string(StatusClosed):
+		return Status(normalized)
+	case "cancelled", "canceled":
+		// Older tk versions used cancelled/canceled for the terminal state now
+		// named closed. Keep completed tasks terminal after loading them.
+		return StatusClosed
+	default:
+		return status
+	}
 }
 
 // TaskID returns the full task ID from project and ref.
