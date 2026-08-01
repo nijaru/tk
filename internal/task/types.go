@@ -157,7 +157,10 @@ func parseLegacyLog(value string) LogEntry {
 
 // captureUnknownJSONFields retains fields introduced by a newer writer so a
 // read-modify-write cycle does not erase data this version does not understand.
-func captureUnknownJSONFields(data []byte, known map[string]struct{}) (map[string]json.RawMessage, error) {
+func captureUnknownJSONFields(
+	data []byte,
+	known map[string]struct{},
+) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
@@ -412,7 +415,11 @@ var DefaultConfig = Config{
 func normalizeTaskStatus(status Status) Status {
 	normalized := strings.ToLower(strings.TrimSpace(string(status)))
 	switch normalized {
-	case string(StatusDeferred), string(StatusOpen), string(StatusActive), string(StatusDone), string(StatusClosed):
+	case string(StatusDeferred),
+		string(StatusOpen),
+		string(StatusActive),
+		string(StatusDone),
+		string(StatusClosed):
 		return Status(normalized)
 	case "cancelled", "canceled":
 		// Older tk versions used cancelled/canceled for the terminal state now

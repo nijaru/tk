@@ -40,7 +40,13 @@ func (c *MvCmd) Run(cli *CLI) error {
 		if cli.JSON {
 			fmt.Println(format.FormatJson(res))
 		} else {
-			fmt.Printf("Renamed project %s -> %s (updated %d references, %d tasks)\n", c.Source, c.Project, res.ReferencesUpdated, len(res.Renamed))
+			fmt.Printf(
+				"Renamed project %s -> %s (updated %d references, %d tasks)\n",
+				c.Source,
+				c.Project,
+				res.ReferencesUpdated,
+				len(res.Renamed),
+			)
 		}
 		return nil
 	}
@@ -59,7 +65,12 @@ func (c *MvCmd) Run(cli *CLI) error {
 	if cli.JSON {
 		fmt.Println(format.FormatJson(res))
 	} else {
-		fmt.Printf("Moved %s -> %s (updated %d references)\n", res.OldID, res.NewID, res.ReferencesUpdated)
+		fmt.Printf(
+			"Moved %s -> %s (updated %d references)\n",
+			res.OldID,
+			res.NewID,
+			res.ReferencesUpdated,
+		)
 	}
 
 	return nil
