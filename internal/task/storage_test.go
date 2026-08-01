@@ -133,6 +133,61 @@ func TestCorruptTaskFilesAreVisible(t *testing.T) {
 	assert.Contains(t, issues[0], "Task file proj-bad1.json is invalid")
 }
 
+func TestReadTaskFileSupportsLegacyStringLogs(t *testing.T) {
+	root := setupTestDir(t)
+	defer os.RemoveAll(root)
+
+	legacy := []byte(`{
+  "project": "tk",
+  "ref": "ixkz",
+  "title": "Legacy task",
+  "description": null,
+  "status": "done",
+  "priority": 3,
+  "labels": [],
+  "assignees": [],
+  "parent": null,
+  "blocked_by": [],
+  "estimate": null,
+  "due_date": null,
+  "logs": [
+    "2026-01-10: Researched embedding models",
+    "A note without a timestamp"
+  ],
+  "created_at": "2026-01-10T09:04:32.061Z",
+  "updated_at": "2026-01-10T19:25:00.000Z",
+  "completed_at": "2026-01-10T19:25:00.000Z",
+  "external": {}
+}`)
+	path := filepath.Join(root, ".tasks", "tk-ixkz.json")
+	require.NoError(t, os.WriteFile(path, legacy, 0o644))
+
+	parsed, err := ReadTaskFile(path)
+	require.NoError(t, err)
+	require.Len(t, parsed.Logs, 2)
+	assert.Equal(t, "2026-01-10", parsed.Logs[0].Ts)
+	assert.Equal(t, "Researched embedding models", parsed.Logs[0].Msg)
+	assert.Empty(t, parsed.Logs[1].Ts)
+	assert.Equal(t, "A note without a timestamp", parsed.Logs[1].Msg)
+
+	// Loading the complete store, which is what list/ready use, must also
+	// succeed when a legacy task is present.
+	all, err := GetAllTasks(filepath.Join(root, ".tasks"))
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+
+	// A later write migrates the entries to the current structured schema.
+	require.NoError(t, SaveTask(parsed))
+	stored, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var migrated struct {
+		Logs []LogEntry `json:"logs"`
+	}
+	require.NoError(t, json.Unmarshal(stored, &migrated))
+	require.Len(t, migrated.Logs, 2)
+	assert.Equal(t, parsed.Logs, migrated.Logs)
+}
+
 func TestLegacyInvalidProjectTaskCanBeMovedAndUsedAsParent(t *testing.T) {
 	root := setupTestDir(t)
 	legacy := Task{

@@ -1,11 +1,13 @@
 package task
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type Status string
@@ -62,6 +64,75 @@ var PriorityFromName = map[string]Priority{
 type LogEntry struct {
 	Ts  string `json:"ts"`
 	Msg string `json:"msg"`
+}
+
+// UnmarshalJSON accepts both the current structured log entries and the
+// legacy string entries written by older tk versions. Legacy entries use a
+// timestamp prefix such as "2026-01-10: message" when one is available.
+func (l *LogEntry) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return fmt.Errorf("log entry must be an object or string")
+	}
+
+	switch data[0] {
+	case '{':
+		type logEntry LogEntry
+		var entry logEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			return err
+		}
+		*l = LogEntry(entry)
+		return nil
+	case '"':
+		var legacy string
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return err
+		}
+		*l = parseLegacyLog(legacy)
+		return nil
+	case 'n':
+		if bytes.Equal(data, []byte("null")) {
+			*l = LogEntry{}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("log entry must be an object or string")
+}
+
+var legacyLogTimestampLayouts = [...]string{
+	"2006-01-02",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+func isLegacyLogTimestamp(value string) bool {
+	for _, layout := range legacyLogTimestampLayouts {
+		if _, err := time.Parse(layout, value); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func parseLegacyLog(value string) LogEntry {
+	if isLegacyLogTimestamp(value) {
+		return LogEntry{Ts: value}
+	}
+
+	// Find a colon that follows a complete timestamp. This handles both the
+	// old date-only form and full RFC3339 timestamps without mistaking the
+	// colons inside an RFC3339 time for the message separator.
+	for i := 0; i < len(value); i++ {
+		if value[i] != ':' || !isLegacyLogTimestamp(value[:i]) {
+			continue
+		}
+		message := strings.TrimLeft(value[i+1:], " \t")
+		return LogEntry{Ts: value[:i], Msg: message}
+	}
+
+	return LogEntry{Msg: value}
 }
 
 type ExternalLink struct {
