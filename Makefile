@@ -1,33 +1,27 @@
 BINARY_NAME=tk
-VERSION?=dev
 
-.PHONY: fmt vet build test clean install release-test
+.PHONY: fmt lint build test clean install completions
 
 fmt:
-	@files="$$(git ls-files '*.go')"; \
-	if [ -z "$$files" ]; then \
-		echo "no tracked Go files to format"; \
-	else \
-		goimports -w $$files; \
-		golines --base-formatter gofumpt -w $$files; \
-	fi
+	cargo fmt --all
 
-vet:
-	go vet ./...
+lint:
+	cargo clippy --all-targets -- -D warnings
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY_NAME) .
+	cargo build --release
+	cp target/release/$(BINARY_NAME) $(BINARY_NAME)
 
 test:
-	go test -v ./...
-
-install:
-	go install -ldflags "-X main.version=$(VERSION)" .
+	cargo test --all-targets
 
 clean:
+	cargo clean
 	rm -f $(BINARY_NAME)
-	rm -rf dist/
 
-# Dry run GoReleaser snapshot (requires: brew install goreleaser)
-release-test:
-	goreleaser release --snapshot --clean
+install:
+	cargo install --path .
+
+# Print fish completions to stdout (requires usage CLI: https://usage.jdx.dev)
+completions:
+	./target/debug/tk __usage_spec__ | usage generate completion fish tk --usage-cmd "tk __usage_spec__"

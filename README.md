@@ -14,10 +14,10 @@ Minimal task tracker. Simple, fast, git-friendly.
 brew install nijaru/tap/tk
 ```
 
-### Go
+### Cargo
 
 ```bash
-go install github.com/nijaru/tk@latest
+cargo install --git https://github.com/nijaru/tk
 ```
 
 ### npm
@@ -31,7 +31,7 @@ npm install -g @nijaru/tk
 ```bash
 git clone https://github.com/nijaru/tk
 cd tk
-go build -o tk .
+cargo build --release
 ```
 
 ## Quick Start
@@ -90,11 +90,10 @@ myapp-x9k2  | p2   | open         | Write tests
 | `tk block <id> <blocker>`   | Add dependency (id blocked by blocker)     |
 | `tk unblock <id> <blocker>` | Remove dependency                          |
 | `tk remove` / `tk rm <id>`  | Delete task (prompts for confirmation)     |
-| `tk mv <id> <project>`      | Move task or rename entire project         |
+| `tk mv <id> <project>`      | Move task to a different project           |
 | `tk clean`                  | Remove old terminal tasks (default: 14d)   |
 | `tk check`                  | Check task integrity                       |
 | `tk config`                 | Show/set configuration                     |
-| `tk completions <shell>`    | Output shell completions (bash, zsh, fish) |
 
 ## Add Options
 
@@ -103,7 +102,7 @@ tk add Title -p 2                  # Priority (0-4)
 tk add Title -P api                # Project prefix
 tk add Title -d "Description"      # Description
 tk add Title -l bug,urgent         # Labels (CSV)
-tk add Title -A nick,alice         # Assignees (CSV, @me for git user)
+tk add Title -A nick,alice         # Assignees (CSV)
 tk add Title --parent a7b3         # Parent task
 tk add Title --estimate 3          # Estimate (user-defined units)
 tk add Title --due 2026-01-15      # Due date (YYYY-MM-DD)
@@ -153,15 +152,22 @@ tk config alias web --rm                   # Remove alias
 
 ## Shell Completions
 
+Completions are generated from the CLI spec with the
+[usage CLI](https://usage.jdx.dev) (`tk __usage_spec__` prints the spec).
+
 ```bash
-# Fish
-tk completions fish > ~/.config/fish/completions/tk.fish
+# Fish (add --install to write the file where your shell looks for it)
+usage generate completion fish tk --usage-cmd "tk __usage_spec__"
 
-# Bash
-tk completions bash >> ~/.bashrc
+# Bash / Zsh (same pattern, any supported shell)
+usage generate completion bash tk --usage-cmd "tk __usage_spec__"
+usage generate completion zsh tk --usage-cmd "tk __usage_spec__"
+```
 
-# Zsh
-tk completions zsh > "${fpath[1]}/_tk"
+A manpage renders the same way:
+
+```bash
+tk __usage_spec__ | usage generate manpage -f -
 ```
 
 ## Priority

@@ -17,30 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions-rust-lang/rust-toolchain@v1
         with:
-          go-version-file: go.mod
-          cache: true
+          toolchain: stable
+          components: rustfmt, clippy
 
-      - name: Install formatters
-        run: |
-          go install golang.org/x/tools/cmd/goimports@latest
-          go install github.com/segmentio/golines@latest
-          go install mvdan.cc/gofumpt@latest
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: |
-          make fmt
-          git diff --exit-code || { echo "Run 'make fmt' and commit the changes."; exit 1; }
+        run: cargo fmt --all --check
 
-      - name: Vet
-        run: go vet ./...
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: go build -o tk .
+        run: cargo build
 
       - name: Test
-        run: go test -race ./...
+        run: cargo test --all-targets
 
       - name: Verify binary
-        run: ./tk --version
+        run: ./target/debug/tk --version

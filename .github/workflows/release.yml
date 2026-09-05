@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g., 0.1.1)"
+        description: "Version to release (e.g., 0.2.0)"
         required: true
         type: string
       dry_run:
@@ -22,39 +22,15 @@ permissions:
   id-token: write # required for npm provenance
 
 jobs:
-  release:
+  # --- Pre-flight: all checks before any side effects ---
+  preflight:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ inputs.version }}
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Ensure latest npm
-        run: |
-          npm install -g npm@latest
-          node -v
-          npm -v
-
-      - name: Install formatters
-        run: |
-          go install golang.org/x/tools/cmd/goimports@latest
-          go install github.com/segmentio/golines@latest
-          go install mvdan.cc/gofumpt@latest
-
-      # --- Pre-flight: all checks before any side effects ---
 
       - name: Validate version format
         run: |
@@ -94,50 +70,217 @@ jobs:
             fi
           done
 
+  # --- Build release binaries on native runners ---
+  build:
+    needs: preflight
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tk_darwin_arm64.tar.gz
+            bin: tk
+          - os: macos-14
+            target: x86_64-apple-darwin
+            archive: tk_darwin_amd64.tar.gz
+            bin: tk
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tk_linux_amd64.tar.gz
+            bin: tk
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tk_linux_arm64.tar.gz
+            bin: tk
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: tk_windows_amd64.zip
+            bin: tk.exe
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The binary reports CARGO_PKG_VERSION, so stamp it before building.
+      - name: Stamp version
+        shell: bash
+        run: |
+          sed -i.bak -E '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/s//version = "'"$VERSION"'"/' Cargo.toml \
+            && rm Cargo.toml.bak
+          grep -q "^version = \"$VERSION\"$" Cargo.toml
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="dist/stage"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$STAGE/"
+          cp LICENSE README.md "$STAGE/"
+          mkdir -p dist/archives
+          if [[ "${{ matrix.archive }}" == *.zip ]]; then
+            (cd "$STAGE" && (zip -q "../archives/${{ matrix.archive }}" * || powershell -Command "Compress-Archive -Path * -DestinationPath ../archives/${{ matrix.archive }}"))
+          else
+            tar -czf "dist/archives/${{ matrix.archive }}" -C "$STAGE" .
+          fi
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/archives/${{ matrix.archive }}
+          if-no-files-found: error
+
+  # --- Publish: tag, GitHub release, tap, npm ---
+  release:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure latest npm
+        run: |
+          npm install -g npm@latest
+          node -v
+          npm -v
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/archives
+          merge-multiple: true
+
       # --- Full CI suite (superset of ci.yml) ---
 
       - name: Check formatting
-        run: |
-          make fmt
-          git diff --exit-code || { echo "Run 'make fmt' and commit the changes."; exit 1; }
+        run: cargo fmt --all --check
 
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        run: go build -ldflags "-X main.version=v$VERSION" -o tk .
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: go test -race ./...
+        run: cargo test --all-targets
+
+      # --- Version stamp + tag ---
+
+      - name: Stamp Cargo.toml version
+        if: ${{ !inputs.dry_run }}
+        run: |
+          sed -i -E '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/s//version = "'"$VERSION"'"/' Cargo.toml
+          grep -q "^version = \"$VERSION\"$" Cargo.toml
+          cargo build # refresh Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): v$VERSION"
+          git push origin HEAD:main
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
 
       - name: Verify version flag
         run: |
-          OUTPUT=$(./tk --version)
-          if ! echo "$OUTPUT" | grep -qF "v$VERSION"; then
-            echo "Error: binary reports '$OUTPUT', expected v$VERSION"
+          sed -E -i.bak '0,/^version = "[0-9]+\.[0-9]+\.[0-9]+"$/s//version = "'"$VERSION"'"/' Cargo.toml
+          rm -f Cargo.toml.bak
+          cargo build --release
+          OUTPUT=$(./target/release/tk --version)
+          if ! echo "$OUTPUT" | grep -qF "$VERSION"; then
+            echo "Error: binary reports '$OUTPUT', expected $VERSION"
             exit 1
           fi
 
-      # --- Publish: GoReleaser → npm (tag is created locally first for GoReleaser) ---
-
-      - name: Create local tag
+      - name: Create GitHub release
         if: ${{ !inputs.dry_run }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v$VERSION"
-
-      - name: Run GoReleaser
-        if: ${{ !inputs.dry_run }}
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+          gh release create "v$VERSION" dist/archives/* \
+            --title "v$VERSION" --generate-notes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        if: ${{ !inputs.dry_run }}
+        env:
           TAP_UPDATE_TOKEN: ${{ secrets.TAP_UPDATE_TOKEN }}
-          GORELEASER_CURRENT_TAG: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          sha() { sha256sum "dist/archives/$1" | cut -d' ' -f1; }
+          SHA_DA=$(sha tk_darwin_arm64.tar.gz)
+          SHA_DX=$(sha tk_darwin_amd64.tar.gz)
+          SHA_LA=$(sha tk_linux_arm64.tar.gz)
+          SHA_LX=$(sha tk_linux_amd64.tar.gz)
+          git clone "https://x-access-token:${TAP_UPDATE_TOKEN}@github.com/nijaru/homebrew-tap.git" dist/tap
+          cat > dist/tap/Formula/tk.rb <<EOF
+          class Tk < Formula
+            desc "Minimal task tracker CLI"
+            homepage "https://github.com/nijaru/tk"
+            version "$VERSION"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/nijaru/tk/releases/download/v$VERSION/tk_darwin_arm64.tar.gz"
+                sha256 "$SHA_DA"
+              end
+              on_intel do
+                url "https://github.com/nijaru/tk/releases/download/v$VERSION/tk_darwin_amd64.tar.gz"
+                sha256 "$SHA_DX"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/nijaru/tk/releases/download/v$VERSION/tk_linux_arm64.tar.gz"
+                sha256 "$SHA_LA"
+              end
+              on_intel do
+                url "https://github.com/nijaru/tk/releases/download/v$VERSION/tk_linux_amd64.tar.gz"
+                sha256 "$SHA_LX"
+              end
+            end
+
+            def install
+              bin.install "tk"
+            end
+
+            test do
+              system "#{bin}/tk", "--version"
+            end
+          end
+          EOF
+          git -C dist/tap add Formula/tk.rb
+          git -C dist/tap -c user.name="github-actions[bot]" \
+            -c user.email="github-actions[bot]@users.noreply.github.com" \
+            commit -m "tk v$VERSION"
+          git -C dist/tap push origin HEAD:main
 
       - name: Publish npm packages
         if: ${{ !inputs.dry_run }}
@@ -148,7 +291,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Download binaries built by GoReleaser from the new GitHub release
+          # Download binaries built by the matrix from the new GitHub release
           mkdir -p dist/npm-dl
           gh release download "v$VERSION" --dir dist/npm-dl --pattern "*.tar.gz" --pattern "*.zip"
 
