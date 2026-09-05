@@ -1,0 +1,32 @@
+[package]
+name = "tk"
+version = "0.2.0"
+edition = "2024"
+description = "Minimal task tracker CLI — single binary, plain JSON in .tasks/"
+license = "MIT"
+repository = "https://github.com/nijaru/tk"
+
+[[bin]]
+name = "tk"
+path = "src/main.rs"
+
+[dependencies]
+usage = { package = "usage-rs", version = "6" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["clock"] }
+rand = "0.9"
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+owo-colors = "4"
+
+[dev-dependencies]
+usage = { package = "usage-rs", version = "6", features = ["test"] }
+insta = "1"
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+strip = true
+opt-level = "z"

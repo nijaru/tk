@@ -1,0 +1,595 @@
+---
+source: tests/cli.rs
+assertion_line: 13
+expression: tree
+---
+=== tk ===
+tk 0.2.0
+Minimal task tracker. Plain JSON in .tasks/ — no daemons, no conflicts.
+
+Usage: tk [-j --json] [-C --dir <DIR>] <SUBCOMMAND>
+
+Commands:
+  add      Create a task
+  block    Add a blocker dependency
+  check    Check task integrity
+  clean    Remove old completed tasks
+  close    Close/cancel a task
+  config   Show or set configuration
+  defer    Defer a task
+  done     Complete a task
+  edit     Edit a task
+  init     Initialize .tasks/ in the current directory
+  list     List tasks [aliases: ls]
+  log      Add a log entry to a task
+  mv       Move a task to a different project
+  open     Reset a task status to open
+  ready    List active/open unblocked tasks [aliases: rdy]
+  remove   Delete a task [aliases: rm]
+  show     Show task details
+  start    Start working on a task (open → active) [aliases: active]
+  unblock  Remove a blocker dependency
+  help     Print this message or the help of the given subcommand(s)
+
+Flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+  -h, --help       Print help
+  -V, --version    Print version
+
+=== tk init ===
+Initialize .tasks/ in the current directory
+
+Usage: tk init [-P --project <PROJECT>]
+
+Flags:
+  -P, --project <PROJECT>  Project name (default: directory name)
+  -h, --help               Print help
+
+Global flags:
+  -j, --json               Output as JSON
+  -C, --dir <DIR>          Run in a different directory
+
+=== tk add ===
+Create a task
+
+Usage: tk add [FLAGS] <TITLE>…
+
+Arguments:
+  <TITLE>…  Task title
+
+Flags:
+  -p, --priority <PRIORITY>    Priority (0-4, p0-p4, or
+                               none/urgent/high/medium/low)
+  -P, --project <PROJECT>      Project prefix
+  -d, --desc <DESC>            Description
+  -l, --labels <LABELS>        Labels (comma-separated, repeatable)
+  -A, --assignees <ASSIGNEES>  Assignees (comma-separated, repeatable)
+      --parent <PARENT>        Parent task ID
+      --estimate <ESTIMATE>    Estimate (user-defined units)
+      --due <DUE>              Due date (YYYY-MM-DD or relative +Nh/+Nd/+Nw/+Nm)
+  -h, --help                   Print help
+
+Global flags:
+  -j, --json                   Output as JSON
+  -C, --dir <DIR>              Run in a different directory
+
+=== tk list ===
+List tasks
+
+Usage: tk list [FLAGS] [SEARCH]…
+
+Arguments:
+  [SEARCH]…  Search title, description, and ID
+
+Flags:
+  -a, --all                  Show all, including done and closed
+  -s, --status <STATUS>      Filter by status (open/active/deferred/done/closed)
+  -p, --priority <PRIORITY>  Filter by priority
+  -P, --project <PROJECT>    Filter by project
+  -l, --label <LABEL>        Filter by label
+      --assignee <ASSIGNEE>  Filter by assignee
+      --parent <PARENT>      Filter by parent task
+      --roots                Top-level tasks only
+      --overdue              Overdue tasks only
+  -n, --limit <LIMIT>        Limit results
+                             (default: 20)
+  -h, --help                 Print help
+
+Global flags:
+  -j, --json                 Output as JSON
+  -C, --dir <DIR>            Run in a different directory
+
+=== tk ready ===
+List active/open unblocked tasks
+
+Usage: tk ready
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk show ===
+Show task details
+
+Usage: tk show <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk start ===
+Start working on a task (open → active)
+
+Usage: tk start <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk open ===
+Reset a task status to open
+
+Usage: tk open <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk defer ===
+Defer a task
+
+Usage: tk defer <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk done ===
+Complete a task
+
+Usage: tk done <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk close ===
+Close/cancel a task
+
+Usage: tk close <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk edit ===
+Edit a task
+
+Usage: tk edit [FLAGS] <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -t, --title <TITLE>             New title
+  -p, --priority <PRIORITY>       New priority
+  -l, --labels <LABELS>           Labels (+add, or replace; use --remove-label
+                                  to remove)
+      --remove-label <REMOVE_LABEL>  Labels to remove (comma-separated)
+  -A, --assignees <ASSIGNEES>     Assignees (+add, or replace; use
+                                  --remove-assignee to remove)
+      --remove-assignee <REMOVE_ASSIGNEE>  Assignees to remove (comma-separated)
+      --due <DUE>                 Due date (YYYY-MM-DD, relative, or - to clear)
+      --parent <PARENT>           Parent task (or - to clear)
+  -d, --desc <DESC>               Description (or - to clear)
+      --estimate <ESTIMATE>       Estimate (or 0 to clear)
+  -h, --help                      Print help
+
+Global flags:
+  -j, --json                      Output as JSON
+  -C, --dir <DIR>                 Run in a different directory
+
+=== tk log ===
+Add a log entry to a task
+
+Usage: tk log <ID> [MSG]…
+
+Arguments:
+  <ID>    Task ID or ref
+  [MSG]…  Log message
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk block ===
+Add a blocker dependency
+
+Usage: tk block <ID> <BLOCKER>
+
+Arguments:
+  <ID>       Task ID or ref to block
+  <BLOCKER>  Blocking task ID or ref
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk unblock ===
+Remove a blocker dependency
+
+Usage: tk unblock <ID> <BLOCKER>
+
+Arguments:
+  <ID>       Task ID or ref
+  <BLOCKER>  Blocking task ID or ref to remove
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk remove ===
+Delete a task
+
+Usage: tk remove [-f --force] <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -f, --force      Skip confirmation
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk mv ===
+Move a task to a different project
+
+(Deliberate break from the Go version: `mv` moves tasks only. Renaming a whole
+project lives under `config project rename`.)
+
+Usage: tk mv <SOURCE> <PROJECT>
+
+Arguments:
+  <SOURCE>   Task ID or ref
+  <PROJECT>  Target project name
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk clean ===
+Remove old completed tasks
+
+Usage: tk clean [--older-than <OLDER_THAN>] [--force]
+
+Flags:
+      --older-than <OLDER_THAN>  Remove tasks completed more than N days ago
+      --force                    Force clean even if disabled in config
+  -h, --help                     Print help
+
+Global flags:
+  -j, --json                     Output as JSON
+  -C, --dir <DIR>                Run in a different directory
+
+=== tk check ===
+Check task integrity
+
+Usage: tk check
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config ===
+Show or set configuration
+
+Usage: tk config <SUBCOMMAND>
+
+Commands:
+  alias        Manage directory aliases for -C
+  clean-after  Configure auto-cleanup
+  defaults     Show or set default values
+  project      Get or set the default project
+  show         Show configuration
+  help         Print this message or the help of the given subcommand(s)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config show ===
+Show configuration
+
+Usage: tk config show
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config project ===
+Get or set the default project
+
+Usage: tk config project <SUBCOMMAND>
+
+Commands:
+  rename  Rename project and all its tasks
+  set     Set default project
+  show    Show default project
+  help    Print this message or the help of the given subcommand(s)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config project show ===
+Show default project
+
+Usage: tk config project show
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config project set ===
+Set default project
+
+Usage: tk config project set <NAME>
+
+Arguments:
+  <NAME>  Project name to set
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config project rename ===
+Rename project and all its tasks
+
+Usage: tk config project rename <OLD> <NEW>
+
+Arguments:
+  <OLD>  Old project name
+  <NEW>  New project name
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config alias ===
+Manage directory aliases for -C
+
+Usage: tk config alias [-r --rm] [NAME] [PATH]
+
+Arguments:
+  [NAME]  Alias name
+  [PATH]  Directory path
+
+Flags:
+  -r, --rm         Remove the alias
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config defaults ===
+Show or set default values
+
+Usage: tk config defaults <SUBCOMMAND>
+
+Commands:
+  assignees  Set default assignees
+  labels     Set default labels
+  priority   Set default priority
+  show       Show default values
+  help       Print this message or the help of the given subcommand(s)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config defaults show ===
+Show default values
+
+Usage: tk config defaults show
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config defaults priority ===
+Set default priority
+
+Usage: tk config defaults priority <LEVEL>
+
+Arguments:
+  <LEVEL>  Default priority level (0-4)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config defaults labels ===
+Set default labels
+
+Usage: tk config defaults labels [LABELS]…
+
+Arguments:
+  [LABELS]…  Default labels (comma-separated)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config defaults assignees ===
+Set default assignees
+
+Usage: tk config defaults assignees [ASSIGNEES]…
+
+Arguments:
+  [ASSIGNEES]…  Default assignees (comma-separated)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config clean-after ===
+Configure auto-cleanup
+
+Usage: tk config clean-after <SUBCOMMAND>
+
+Commands:
+  days     Set clean-after days
+  disable  Disable auto-clean
+  enable   Enable auto-clean
+  show     Show clean-after config
+  help     Print this message or the help of the given subcommand(s)
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config clean-after show ===
+Show clean-after config
+
+Usage: tk config clean-after show
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config clean-after enable ===
+Enable auto-clean
+
+Usage: tk config clean-after enable
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config clean-after disable ===
+Disable auto-clean
+
+Usage: tk config clean-after disable
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
+
+=== tk config clean-after days ===
+Set clean-after days
+
+Usage: tk config clean-after days <DAYS>
+
+Arguments:
+  <DAYS>  Days after which to clean completed tasks
+
+Flags:
+  -h, --help       Print help
+
+Global flags:
+  -j, --json       Output as JSON
+  -C, --dir <DIR>  Run in a different directory
