@@ -17,7 +17,8 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 | `src/timeutil.rs`  | Due parsing (`+7d`), calendar-day overdue, RFC3339Nano stamps  |
 | `src/format.rs`    | Table/JSON output, color handling, unicode-safe truncation     |
 | `tests/cli.rs`     | Help-drift snapshot + end-to-end CLI tests                     |
-| `ai/`              | Local-only AI context — excluded via `.git/info/exclude`       |
+| `ai/`              | **Symlink** into the central knowledge store (`agent-context/projects/github.com/nijaru/tk/ai`). Owned by the context system — do not write here from a repo session |
+| `.local/`          | Clone-local working notes — excluded via `.git/info/exclude`   |
 | `.tasks/`          | Local-only task state — excluded via `.git/info/exclude`       |
 
 ## Technology Stack

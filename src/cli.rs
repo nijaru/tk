@@ -11,7 +11,7 @@ pub struct AppCtx {
     pub color: bool,
 }
 
-/// Minimal task tracker. Plain JSON in .tasks/ — no daemons, no runtime.
+/// Minimal task tracker. Append-only JSON records in .tasks/ — no daemons, no runtime.
 #[derive(Cli)]
 #[usage(bin = "tk", version, run_with)]
 pub struct Cli {
@@ -77,16 +77,16 @@ pub enum Commands {
     Block(crate::commands::Block),
     /// Remove a blocker dependency
     Unblock(crate::commands::Unblock),
-    /// Delete a task
+    /// Delete a task record
     #[usage(alias = "rm")]
-    Remove(crate::commands::Remove),
-    /// Repair recorded inconsistencies in a task file
-    Repair(crate::commands::Repair),
+    Purge(crate::commands::Purge),
+    /// Drop a record's torn last line (from an interrupted write)
+    Recover(crate::commands::Recover),
     /// Move a task to a different project
     Mv(crate::commands::Mv),
     /// Remove old completed tasks (archives by default)
     Clean(crate::commands::Clean),
-    /// Check task integrity (non-zero exit on findings)
+    /// Check store integrity (non-zero exit on findings)
     Check(crate::commands::Check),
     /// Print the resolved task store location
     Path(crate::commands::StorePath),

@@ -145,9 +145,19 @@ impl RunWith<AppCtx> for ProjectRename {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let txn = ctx.store.txn().into_diagnostic()?;
         let res = txn.rename_project(&self.old, &self.new).into_diagnostic()?;
-        println!("Renamed project {:?} -> {:?}", self.old, self.new);
-        println!("  Renamed {} tasks", res.renamed.len());
-        println!("  Updated {} references", res.references_updated);
+        if ctx.json {
+            println!(
+                "{}",
+                format::format_json(&serde_json::json!({
+                    "old": self.old,
+                    "new": self.new,
+                    "renamed": res.renamed,
+                }))
+            );
+        } else {
+            println!("Renamed project {:?} -> {:?}", self.old, self.new);
+            println!("  Updated {} tasks", res.renamed.len());
+        }
         Ok(())
     }
 }

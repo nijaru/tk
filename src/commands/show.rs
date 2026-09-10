@@ -1,7 +1,7 @@
 //! `tk show`
 //!
-//! Read-only: it reports inconsistencies and never repairs them. Use `tk repair`
-//! for an explicit fix.
+//! Read-only: it reports inconsistencies and never repairs them. `tk recover`
+//! drops a torn tail, and `tk purge --scrub` removes dangling references.
 
 use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
@@ -16,7 +16,7 @@ use super::resolve;
 /// Show task details
 #[derive(Args)]
 pub struct Show {
-    /// Task ID or ref
+    /// Task alias, ID, or ID prefix
     pub id: String,
 }
 
@@ -50,7 +50,7 @@ impl RunWith<AppCtx> for Show {
                 println!(
                     "{}",
                     format::warning(
-                        "Run 'tk repair <id> [--drop-missing]' to fix these.",
+                        "Run 'tk check' for the whole store, or 'tk recover <id>' to drop a torn line.",
                         ctx.color
                     )
                 );

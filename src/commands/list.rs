@@ -6,14 +6,14 @@ use usage::{Args, RunWith};
 use crate::cli::AppCtx;
 use crate::format;
 use crate::model::{Priority, Status};
-use crate::store::{self, ListOptions};
+use crate::store::ListOptions;
 
 use super::resolve;
 
 /// List tasks
 #[derive(Args)]
 pub struct List {
-    /// Search title, description, and ID
+    /// Search title, description, alias, and ID
     pub search: Vec<String>,
     /// Show all, including done and closed
     #[usage(short = 'a', long = "all")]
@@ -78,9 +78,9 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<crate::model::Tas
     let parent = cmd.parent.map(|p| resolve(ctx, &p)).transpose()?.map(Some);
     let hide_terminal = !cmd.all && !cmd.archived && !status.is_some_and(|s| s.is_terminal());
 
-    store::list_tasks(
-        &ctx.store,
-        &ListOptions {
+    let store = ctx.store.store().into_diagnostic()?;
+    store
+        .list(&ListOptions {
             search: cmd.search.join(" "),
             hide_terminal,
             status,
@@ -98,9 +98,8 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<crate::model::Tas
             } else {
                 cmd.limit.max(0) as usize
             },
-        },
-    )
-    .into_diagnostic()
+        })
+        .into_diagnostic()
 }
 
 /// List active/open unblocked tasks
@@ -111,7 +110,8 @@ impl RunWith<AppCtx> for Ready {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let tasks = store::list_tasks(&ctx.store, &ListOptions::default()).into_diagnostic()?;
+        let store = ctx.store.store().into_diagnostic()?;
+        let tasks = store.list(&ListOptions::default()).into_diagnostic()?;
         let ready: Vec<_> = tasks
             .into_iter()
             .filter(|t| {

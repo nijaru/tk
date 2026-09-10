@@ -8,14 +8,13 @@ use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::format;
-use crate::store;
 
 /// Add a blocker dependency
 #[derive(Args)]
 pub struct Block {
-    /// Task ID or ref to block
+    /// Task to block (alias, ID, or ID prefix)
     pub id: String,
-    /// Blocking task ID or ref
+    /// Blocking task (alias, ID, or ID prefix)
     pub blocker: String,
 }
 
@@ -23,25 +22,27 @@ impl RunWith<AppCtx> for Block {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
         let txn = ctx.store.txn().into_diagnostic()?;
         let id = txn.resolve(&self.id).into_diagnostic()?;
         let blocker = txn.resolve(&self.blocker).into_diagnostic()?;
-        if id == blocker {
-            return Err(miette::miette!("task cannot block itself"));
-        }
-        let existing = txn.load(&id).into_diagnostic()?;
-        if existing.blocked_by.iter().any(|b| b == &blocker) {
-            println!("Task {id} is already blocked by {blocker}");
+        let blocker_label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
+        if txn
+            .load(&id)
+            .into_diagnostic()?
+            .state
+            .blocked_by
+            .iter()
+            .any(|b| b == &blocker)
+        {
+            println!("Task {id} is already blocked by {blocker_label}");
             return Ok(());
-        }
-        if store::would_block_cycle(txn.ctx(), &id, &blocker) {
-            return Err(miette::miette!("would create circular dependency"));
         }
         let t = txn.add_blocker(&id, &blocker).into_diagnostic()?;
         if ctx.json {
             println!("{}", format::format_json(&t));
         } else {
-            println!("Blocked {id} by {blocker}");
+            println!("Blocked {} by {blocker_label}", t.task.alias);
         }
         Ok(())
     }
@@ -50,9 +51,9 @@ impl RunWith<AppCtx> for Block {
 /// Remove a blocker dependency
 #[derive(Args)]
 pub struct Unblock {
-    /// Task ID or ref
+    /// Task alias, ID, or ID prefix
     pub id: String,
-    /// Blocking task ID or ref to remove
+    /// Blocking task to remove
     pub blocker: String,
 }
 
@@ -60,19 +61,26 @@ impl RunWith<AppCtx> for Unblock {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
         let txn = ctx.store.txn().into_diagnostic()?;
         let id = txn.resolve(&self.id).into_diagnostic()?;
         let blocker = txn.resolve(&self.blocker).into_diagnostic()?;
+        let blocker_label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
         let (t, found) = txn.remove_blocker(&id, &blocker).into_diagnostic()?;
         if !found {
-            println!("Task {id} is not blocked by {blocker}");
+            println!("Task {} is not blocked by {blocker_label}", t.task.alias);
             return Ok(());
         }
         if ctx.json {
             println!("{}", format::format_json(&t));
         } else {
-            println!("Unblocked {id} from {blocker}");
+            println!("Unblocked {} from {blocker_label}", t.task.alias);
         }
         Ok(())
     }
+}
+
+/// Display an ID compactly in human output.
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
 }

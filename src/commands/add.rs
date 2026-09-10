@@ -1,11 +1,15 @@
 //! `tk add`
+//!
+//! Creation takes the store lock: alias uniqueness is store-wide, and two
+//! concurrent adds must not be able to pick the same one. `add` never creates a
+//! store — `tk init` is the only command that does.
 
 use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Priority;
-use crate::store::{self, CreateOptions};
+use crate::store::CreateOptions;
 use crate::{format, timeutil};
 
 /// Create a task
@@ -17,7 +21,7 @@ pub struct Add {
     /// Priority (0-4, p0-p4, or none/urgent/high/medium/low)
     #[usage(short = 'p', long)]
     pub priority: Option<String>,
-    /// Project prefix
+    /// Project (display grouping; identity is unaffected)
     #[usage(short = 'P', long)]
     pub project: Option<String>,
     /// Description
@@ -29,7 +33,7 @@ pub struct Add {
     /// Assignees (comma-separated, repeatable)
     #[usage(short = 'A', long, delimiter = ',')]
     pub assignees: Vec<String>,
-    /// Parent task ID
+    /// Parent task (alias, ID, or ID prefix)
     #[usage(long)]
     pub parent: Option<String>,
     /// Estimate (user-defined units)
@@ -56,16 +60,15 @@ impl RunWith<AppCtx> for Add {
             .into_diagnostic()?
             .flatten();
 
-        // Resolution, parent validation, and the write share one transaction.
-        let txn = ctx.store.txn_bootstrap().into_diagnostic()?;
+        // Resolution, parent validation, and the write share one transaction,
+        // so a concurrent purge cannot invalidate the parent it checked.
+        ctx.require_store()?;
+        let txn = ctx.store.txn().into_diagnostic()?;
         let parent = self
             .parent
             .map(|p| txn.resolve(&p))
             .transpose()
             .into_diagnostic()?;
-        if let Some(p) = &parent {
-            store::validate_parent(txn.ctx(), p, "").into_diagnostic()?;
-        }
 
         let labels = (!self.labels.is_empty()).then_some(self.labels);
         let assignees = (!self.assignees.is_empty()).then_some(self.assignees);
@@ -87,7 +90,7 @@ impl RunWith<AppCtx> for Add {
         if ctx.json {
             println!("{}", format::format_json(&t));
         } else {
-            println!("Created task {}: {}", t.id, t.task.title);
+            println!("Created task {} ({})", t.task.alias, t.task.id);
         }
         Ok(())
     }

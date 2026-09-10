@@ -1,16 +1,13 @@
 //! Output formatting: task tables, detail views, config display, JSON.
 //!
-//! Fixes vs the Go version:
-//! - Truncation counts Unicode scalar values, not bytes.
-//! - The ID column sizes to the content instead of a fixed 11 chars.
-//! - Timestamp rendering goes through [`crate::timeutil`], which understands
-//!   the fractional-second timestamps the store actually writes.
+//! The table shows the 4-character alias — the handle people type — while the
+//! detail view shows both the alias and the full ULID. JSON always carries both.
 
 use std::io::IsTerminal as _;
 
 use owo_colors::OwoColorize;
 
-use crate::model::{Config, Priority, Status, TaskView};
+use crate::model::{Config, Priority, Status, TaskState, TaskView};
 use crate::timeutil;
 
 /// Color when stdout is a TTY and `NO_COLOR` is unset.
@@ -77,13 +74,14 @@ fn priority_style(p: Priority) -> Style {
     }
 }
 
-fn id_width(tasks: &[TaskView]) -> usize {
+/// Width of the handle column: the longest alias in the result set.
+fn alias_width(tasks: &[TaskView]) -> usize {
     tasks
         .iter()
-        .map(|t| t.id.chars().count())
+        .map(|t| t.task.alias.chars().count())
         .max()
-        .unwrap_or(2)
-        .clamp(11, 32)
+        .unwrap_or(4)
+        .clamp(4, 12)
 }
 
 fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
@@ -115,7 +113,7 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
         };
         return format!(
             "{:<w$} | {} | {} | {}",
-            t.id,
+            t.task.alias,
             paint(color, &prio, priority_style(t.task.priority)),
             paint(color, &status, sc),
             paint(color, &title, tc),
@@ -137,7 +135,11 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
             markers += &format!(" [due {d}d]");
         }
     }
-    format!("{:<w$} | {prio} | {status} | {title}{markers}", t.id, w = w)
+    format!(
+        "{:<w$} | {prio} | {status} | {title}{markers}",
+        t.task.alias,
+        w = w
+    )
 }
 
 pub fn format_task_list(tasks: &[TaskView], empty_hint: &str, color: bool) -> String {
@@ -147,8 +149,8 @@ pub fn format_task_list(tasks: &[TaskView], empty_hint: &str, color: bool) -> St
         }
         return empty_hint.to_owned();
     }
-    let w = id_width(tasks);
-    let header = format!("{:<w$} | PRIO | STATUS       | TITLE", "ID");
+    let w = alias_width(tasks);
+    let header = format!("{:<w$} | PRIO | STATUS       | TITLE", "REF");
     let divider = "-".repeat(header.chars().count());
     let mut rows = vec![header, divider];
     rows.extend(tasks.iter().map(|t| format_task_row_w(t, color, w)));
@@ -156,44 +158,49 @@ pub fn format_task_list(tasks: &[TaskView], empty_hint: &str, color: bool) -> St
 }
 
 pub fn format_task_detail(t: &TaskView, color: bool) -> String {
+    let task: &TaskState = &t.task;
     let mut lines = Vec::new();
-    lines.push(format!("ID:          {}", t.id));
-    if !t.task.title.is_empty() {
-        lines.push(format!("Title:       {}", t.task.title));
+    lines.push(format!("ID:          {}", task.id));
+    lines.push(format!("Ref:         {}", task.alias));
+    if !task.legacy_aliases.is_empty() {
+        lines.push(format!("Also known:  {}", task.legacy_aliases.join(", ")));
+    }
+    lines.push(format!("Project:     {}", task.project));
+    if !task.title.is_empty() {
+        lines.push(format!("Title:       {}", task.title));
     }
     let sc = if t.is_overdue {
         Style::RedBold
     } else {
-        status_style(t.task.status)
+        status_style(task.status)
     };
     lines.push(format!(
         "Status:      {}",
-        paint(color, &t.task.status.to_string(), sc)
+        paint(color, &task.status.to_string(), sc)
     ));
     lines.push(format!(
         "Priority:    {}",
-        paint(
-            color,
-            t.task.priority.name(),
-            priority_style(t.task.priority)
-        )
+        paint(color, task.priority.name(), priority_style(task.priority))
     ));
-    if let Some(d) = &t.task.description {
+    if let Some(d) = &task.description {
         lines.push(format!("Description: {d}"));
     }
-    if !t.task.labels.is_empty() {
-        lines.push(format!("Labels:      {}", t.task.labels.join(", ")));
+    if !task.labels.is_empty() {
+        lines.push(format!("Labels:      {}", task.labels.join(", ")));
     }
-    if !t.task.assignees.is_empty() {
-        lines.push(format!("Assignees:   {}", t.task.assignees.join(", ")));
+    if !task.assignees.is_empty() {
+        lines.push(format!("Assignees:   {}", task.assignees.join(", ")));
     }
-    if let Some(p) = &t.task.parent {
+    if let Some(a) = &task.assignee {
+        lines.push(format!("Assignee:    {a}"));
+    }
+    if let Some(p) = &t.parent_ref {
         lines.push(format!("Parent:      {p}"));
     }
-    if let Some(e) = t.task.estimate {
+    if let Some(e) = task.estimate {
         lines.push(format!("Estimate:    {e}"));
     }
-    if let Some(d) = &t.task.due_date {
+    if let Some(d) = &task.due_date {
         let mut due = d.clone();
         if t.is_overdue {
             due += &paint(color, " [OVERDUE]", Style::RedBold);
@@ -210,61 +217,62 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
     }
     lines.push(format!(
         "Created:     {}",
-        timeutil::format_date(&t.task.created_at)
+        timeutil::format_date(&task.created_at)
     ));
     lines.push(format!(
         "Updated:     {}",
-        timeutil::format_date(&t.task.updated_at)
+        timeutil::format_date(&task.updated_at)
     ));
-    if let Some(c) = &t.task.completed_at {
+    if let Some(c) = &task.completed_at {
         lines.push(format!("Completed:   {}", timeutil::format_date(c)));
     }
-    if let Some(a) = &t.task.archived_at {
+    if let Some(a) = &task.archived_at {
         lines.push(format!("Archived:    {}", timeutil::format_date(a)));
     }
     lines.push(format!("Revision:    {}", t.rev));
     if !t.unresolved_blockers.is_empty() {
         lines.push(format!(
-            "Unresolved:  {} (missing tasks)",
-            t.unresolved_blockers.join(", ")
+            "Unresolved:  {} (task missing from the store)",
+            t.unresolved_blockers
+                .iter()
+                .map(|id| id.chars().take(8).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
-    if !t.task.blocked_by.is_empty() {
+    if !task.blocked_by.is_empty() {
         let state = if t.blocked_by_incomplete {
             " (blocked)"
         } else {
             " (resolved)"
         };
-        lines.push(format!(
-            "Blockers:    {}{state}",
-            t.task.blocked_by.join(", ")
-        ));
+        lines.push(format!("Blockers:    {}{state}", t.blocker_refs.join(", ")));
     }
-    if let Some(c) = &t.task.checkpoint {
+    if let Some(c) = &task.checkpoint {
         lines.push(String::new());
         lines.push(format!("Checkpoint:  {c}"));
     }
-    if !t.task.links.is_empty() {
-        lines.push(format!("Links:       {}", t.task.links.join(", ")));
+    if !task.links.is_empty() {
+        lines.push(format!("Links:       {}", task.links.join(", ")));
     }
-    if !t.task.acceptance.is_empty() {
+    if !task.acceptance.is_empty() {
         lines.push(String::new());
         lines.push("Acceptance:".to_owned());
-        for a in &t.task.acceptance {
+        for a in &task.acceptance {
             lines.push(format!("  - {a}"));
         }
     }
-    if !t.task.evidence.is_empty() {
+    if !task.evidence.is_empty() {
         lines.push(String::new());
         lines.push("Evidence:".to_owned());
-        for e in &t.task.evidence {
+        for e in &task.evidence {
             lines.push(format!("  - {e}"));
         }
     }
-    if !t.task.logs.is_empty() {
+    if !task.logs.is_empty() {
         lines.push(String::new());
         lines.push("Log:".to_owned());
-        for log in &t.task.logs {
+        for log in &task.logs {
             lines.push(format!(
                 "  [{}] {}",
                 timeutil::format_date(&log.ts),
@@ -286,7 +294,7 @@ pub fn format_json<T: serde::Serialize>(value: &T) -> String {
 
 pub fn format_config(config: &Config) -> String {
     let mut lines = vec![
-        format!("Version:     {}", config.version),
+        format!("Format:      {}", config.format),
         format!("Project:     {}", config.project),
     ];
     if config.clean_after.enabled {
@@ -322,27 +330,23 @@ pub fn format_config(config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LogEntry, Task};
+    use crate::model::{LogEntry, TaskState};
 
     fn sample() -> TaskView {
-        crate::store::enrich(
-            &crate::store::Ctx {
-                cwd: "/tmp".into(),
-                root: "/tmp".into(),
-                tasks_dir: "/tmp".into(),
-                exists: false,
-                source: crate::store::StoreSource::Discovered,
-                worktree: false,
-            },
-            &Task {
-                project: "tk".into(),
-                r#ref: "a7b3".into(),
+        TaskView {
+            task: TaskState {
+                id: "01j8x0m5r7000000000000000a".into(),
+                alias: "a7b3".into(),
+                legacy_aliases: Vec::new(),
+                project: "demo".into(),
                 title: "Implement auth".into(),
                 description: None,
                 status: Status::Open,
                 priority: Priority::Urgent,
                 labels: vec![],
                 assignees: vec![],
+                assignee: None,
+                attempt: 0,
                 parent: None,
                 blocked_by: vec![],
                 estimate: None,
@@ -355,14 +359,19 @@ mod tests {
                 links: Vec::new(),
                 acceptance: Vec::new(),
                 evidence: Vec::new(),
-                previous_ids: Vec::new(),
-                archived_at: None,
                 created_at: "2026-01-10T12:00:00.000000000Z".into(),
                 updated_at: "2026-01-10T12:00:00.000000000Z".into(),
                 completed_at: None,
+                archived_at: None,
             },
-            &std::collections::HashMap::new(),
-        )
+            rev: "1-aaaa:1:deadbeef".into(),
+            blocked_by_incomplete: false,
+            unresolved_blockers: Vec::new(),
+            blocker_refs: Vec::new(),
+            parent_ref: None,
+            is_overdue: true,
+            days_until_due: None,
+        }
     }
 
     #[test]
@@ -373,18 +382,44 @@ mod tests {
     }
 
     #[test]
-    fn plain_markers_and_detail() {
+    fn the_table_uses_the_alias_not_the_ulid() {
         let t = sample();
-        assert!(t.is_overdue);
-        let row = format_task_row_w(&t, false, 11);
-        assert!(row.contains("[OVERDUE]"), "{row}");
+        let table = format_task_list(std::slice::from_ref(&t), "", false);
+        assert!(table.contains("a7b3"), "{table}");
+        assert!(
+            !table.contains("01j8x0m5r7000000000000000a"),
+            "the 26-character ID must not widen every row: {table}"
+        );
+        assert!(table.contains("[OVERDUE]"), "{table}");
+    }
+
+    #[test]
+    fn detail_shows_both_handles_and_renders_timestamps() {
+        let t = sample();
         let detail = format_task_detail(&t, false);
-        assert!(detail.contains("ID:          tk-a7b3"), "{detail}");
+        assert!(detail.contains("01j8x0m5r7000000000000000a"), "{detail}");
+        assert!(detail.contains("Ref:         a7b3"), "{detail}");
         assert!(detail.contains("[OVERDUE]"), "{detail}");
         // Nano timestamps must render, not pass through raw.
         assert!(
             !detail.contains("2026-01-10T12:00:00.000000000Z"),
             "{detail}"
+        );
+    }
+
+    #[test]
+    fn references_render_as_aliases_not_ulids() {
+        let mut t = sample();
+        t.task.blocked_by = vec!["01m25qbfpr5ekbr9zxh0xc93kx".into()];
+        t.blocker_refs = vec!["vp80".into()];
+        t.blocked_by_incomplete = true;
+        t.parent_ref = Some("jvv2".into());
+        let detail = format_task_detail(&t, false);
+        assert!(detail.contains("Blockers:    vp80 (blocked)"), "{detail}");
+        assert!(detail.contains("Parent:      jvv2"), "{detail}");
+        assert!(
+            !detail.contains("Blockers:    01m25qbf"),
+            "the blocker line must not lead with a ULID: {detail}"
         );
     }
 }

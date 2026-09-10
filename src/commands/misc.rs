@@ -1,7 +1,7 @@
-//! `tk rm` / `tk init` / `tk mv` / `tk clean` / `tk check` / `tk repair` /
+//! `tk init` / `tk mv` / `tk clean` / `tk check` / `tk purge` / `tk recover` /
 //! `tk path` / `tk lock`
 
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal as _};
 
 use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
@@ -9,30 +9,54 @@ use usage::{Args, RunWith};
 use crate::cli::AppCtx;
 use crate::format;
 use crate::ids;
+use crate::record::op;
 use crate::store::{self, StoreLock};
 
-/// Delete a task
+use super::Writer;
+
+/// Delete a task record
+///
+/// Refuses while other tasks still reference it: those references would become
+/// dangling, and a broken graph is worse than a stale record.
 #[derive(Args)]
-pub struct Remove {
-    /// Task ID or ref
+pub struct Purge {
+    /// Task alias, ID, or ID prefix
     pub id: String,
     /// Skip confirmation
     #[usage(short = 'f', long)]
     pub force: bool,
-    /// Reject the delete unless the task still has this revision (`show --json`)
+    /// Delete anyway, removing the references that point at it
+    #[usage(long)]
+    pub scrub: bool,
+    /// Reject the delete unless the task still has this revision
     #[usage(long = "if-rev", value_name = "REV")]
     pub if_rev: Option<String>,
 }
 
-impl RunWith<AppCtx> for Remove {
+impl RunWith<AppCtx> for Purge {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
         let txn = ctx.store.txn().into_diagnostic()?;
         let id = txn.resolve(&self.id).into_diagnostic()?;
+        txn.check_rev(&id, self.if_rev.as_deref())
+            .into_diagnostic()?;
+        let record = txn.load(&id).into_diagnostic()?;
+
         if !self.force {
-            let t = txn.load(&id).into_diagnostic()?;
-            print!("Delete {} {:?}? [y/N] ", t.id(), t.title);
+            // Never delete unattended: a script or agent that forgets -f gets an
+            // error, not a silent removal.
+            if !std::io::stdin().is_terminal() {
+                return Err(miette::miette!(
+                    "refusing to delete {} without -f (stdin is not a terminal)",
+                    record.state.alias
+                ));
+            }
+            print!(
+                "Delete {} {:?}? [y/N] ",
+                record.state.alias, record.state.title
+            );
             use std::io::Write as _;
             std::io::stdout().flush().into_diagnostic()?;
             let mut line = String::new();
@@ -40,27 +64,26 @@ impl RunWith<AppCtx> for Remove {
                 .lock()
                 .read_line(&mut line)
                 .into_diagnostic()?;
-            match line.trim().to_lowercase().as_str() {
-                "y" | "yes" => {}
-                _ => {
-                    println!("Aborted.");
-                    return Ok(());
-                }
+            if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                println!("Aborted.");
+                return Ok(());
             }
         }
-        let out = txn.remove(&id, self.if_rev.as_deref()).into_diagnostic()?;
+
+        let out = txn.purge(&id, self.scrub).into_diagnostic()?;
         if ctx.json {
             println!(
                 "{}",
                 format::format_json(&serde_json::json!({
-                    "deleted": out.id,
+                    "deleted": out.deleted,
                     "references_scrubbed": out.references_scrubbed,
+                    "referrers": out.referrers,
                 }))
             );
         } else {
             println!(
-                "Deleted task {} (scrubbed {} references)",
-                out.id, out.references_scrubbed
+                "Deleted {} (scrubbed {} references)",
+                out.deleted, out.references_scrubbed
             );
         }
         Ok(())
@@ -80,10 +103,16 @@ impl RunWith<AppCtx> for Init {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         if ctx.store.exists {
-            return Err(miette::miette!(
-                ".tasks directory already exists at {}",
-                ctx.store.tasks_dir.display()
-            ));
+            // Either this store is already v1, or it is a legacy layout that
+            // must be migrated rather than written over. `check_format` says
+            // which, in words the reader can act on.
+            return match ctx.store.check_format() {
+                Ok(()) => Err(miette::miette!(
+                    "task store already initialized at {}",
+                    ctx.store.tasks_dir.display()
+                )),
+                Err(e) => Err(e).into_diagnostic(),
+            };
         }
         let name = match self.project {
             Some(p) => p,
@@ -99,32 +128,37 @@ impl RunWith<AppCtx> for Init {
         // Creating the store is deliberate: an explicit --tasks-dir is allowed
         // to come into existence here, and only here.
         let txn = ctx.store.txn_init().into_diagnostic()?;
-        if ctx.store.config_path().exists() {
-            return Err(miette::miette!(
-                "task store already initialized at {}",
-                ctx.store.tasks_dir.display()
-            ));
-        }
         let config = crate::model::Config {
             project: name,
             ..Default::default()
         };
-        txn.save_config(&config).into_diagnostic()?;
-        println!(
-            "Initialized empty tk project in {}",
-            ctx.store.tasks_dir.display()
-        );
+        txn.init_store(&config).into_diagnostic()?;
+        if ctx.json {
+            println!(
+                "{}",
+                format::format_json(&serde_json::json!({
+                    "tasks_dir": ctx.store.tasks_dir.display().to_string(),
+                    "format": config.format,
+                    "project": config.project,
+                }))
+            );
+        } else {
+            println!(
+                "Initialized empty tk project in {}",
+                ctx.store.tasks_dir.display()
+            );
+        }
         Ok(())
     }
 }
 
 /// Move a task to a different project
 ///
-/// (Deliberate break from the Go version: `mv` moves tasks only. Renaming a
-/// whole project lives under `config project rename`.)
+/// Identity is unaffected: a move changes one display field, and no reference
+/// anywhere needs rewriting.
 #[derive(Args)]
 pub struct Mv {
-    /// Task ID or ref
+    /// Task alias, ID, or ID prefix
     pub source: String,
     /// Target project name
     pub project: String,
@@ -134,22 +168,25 @@ impl RunWith<AppCtx> for Mv {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.source).into_diagnostic()?;
-        let res = txn.move_task(&id, &self.project).into_diagnostic()?;
+        ids::validate_project(&self.project).into_diagnostic()?;
+        let writer = Writer::new(&ctx, false)?;
+        let id = writer.store().resolve(&self.source).into_diagnostic()?;
+        let record = writer.load(&id)?;
+        if record.state.project == self.project {
+            return Err(miette::miette!(
+                "{} is already in project {:?}",
+                record.state.alias,
+                self.project
+            ));
+        }
+        writer.append(&id, op::PROJECT, serde_json::json!(self.project), None)?;
+        let t = writer.view(&id)?;
         if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "old_id": res.old_id,
-                    "new_id": res.new_id,
-                    "references_updated": res.references_updated,
-                }))
-            );
+            println!("{}", format::format_json(&t));
         } else {
             println!(
-                "Moved {} -> {} (updated {} references)",
-                res.old_id, res.new_id, res.references_updated
+                "Moved {} ({}) to project {}",
+                t.task.alias, t.task.id, t.task.project
             );
         }
         Ok(())
@@ -220,7 +257,7 @@ impl RunWith<AppCtx> for Clean {
     }
 }
 
-/// Check task integrity
+/// Check store integrity
 ///
 /// Exits non-zero when anything is reported, so scripts and agents cannot
 /// mistake findings for success.
@@ -231,7 +268,7 @@ impl RunWith<AppCtx> for Check {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ctx.store.require().into_diagnostic()?;
+        ctx.require_store()?;
         let issues = store::check_integrity(&ctx.store).into_diagnostic()?;
         if ctx.json {
             println!(
@@ -259,58 +296,56 @@ impl RunWith<AppCtx> for Check {
     }
 }
 
-/// Repair recorded inconsistencies in a task file
+/// Drop a record's torn last line, left behind by an interrupted write
+///
+/// Only the incomplete final line is removed: it was never a complete event,
+/// so nothing that was appended is lost.
 #[derive(Args)]
-pub struct Repair {
-    /// Task ID or ref
-    pub id: String,
-    /// Also drop references to missing blocker/parent tasks
-    #[usage(long = "drop-missing")]
-    pub drop_missing: bool,
+pub struct Recover {
+    /// Task alias, ID, or ID prefix (default: every record)
+    pub id: Option<String>,
+    /// Report what would be dropped without changing anything
+    #[usage(long)]
+    pub dry_run: bool,
 }
 
-impl RunWith<AppCtx> for Repair {
+impl RunWith<AppCtx> for Recover {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
         let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        let out = txn.repair(&id, self.drop_missing).into_diagnostic()?;
-
+        let id = self
+            .id
+            .map(|input| txn.resolve(&input))
+            .transpose()
+            .into_diagnostic()?;
+        let out = txn.recover(id.as_deref(), self.dry_run).into_diagnostic()?;
         if ctx.json {
-            println!("{}", format::format_json(&out));
-        } else if out.changed() {
-            println!("Repaired {id}:");
-            if let Some(was) = &out.renamed_id {
-                println!("  rewrote content ID (was {was}) to match the file name");
-            }
-            if !out.dropped_blockers.is_empty() {
-                println!("  dropped blockers: {}", out.dropped_blockers.join(", "));
-            }
-            if let Some(p) = &out.dropped_parent {
-                println!("  dropped parent: {p}");
-            }
+            println!(
+                "{}",
+                format::format_json(&serde_json::json!({
+                    "repaired": out.repaired,
+                    "bytes_dropped": out.bytes_dropped,
+                    "dry_run": out.dry_run,
+                }))
+            );
+        } else if out.repaired.is_empty() {
+            println!("No torn records found.");
+        } else if self.dry_run {
+            println!(
+                "Would repair {} record(s), dropping {} byte(s): {}",
+                out.repaired.len(),
+                out.bytes_dropped,
+                out.repaired.join(", ")
+            );
         } else {
-            println!("No repairs needed for {id}.");
-        }
-
-        // Remaining issues are reported, never fixed implicitly.
-        let remaining = store::inconsistencies(txn.ctx(), &txn.load(&id).into_diagnostic()?, &id);
-        if ctx.json {
-            if !remaining.is_empty() {
-                for issue in &remaining {
-                    eprintln!("{}", format::warning(issue, ctx.color));
-                }
-            }
-        } else {
-            for issue in &remaining {
-                println!("{}", format::warning(issue, ctx.color));
-            }
-            if !remaining.is_empty() && !self.drop_missing {
-                println!(
-                    "Run 'tk repair {id} --drop-missing' to drop these references, or restore the missing tasks."
-                );
-            }
+            println!(
+                "Repaired {} record(s), dropping {} byte(s): {}",
+                out.repaired.len(),
+                out.bytes_dropped,
+                out.repaired.join(", ")
+            );
         }
         Ok(())
     }

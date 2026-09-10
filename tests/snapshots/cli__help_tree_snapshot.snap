@@ -3,8 +3,9 @@ source: tests/cli.rs
 expression: tree
 ---
 === tk ===
-tk 0.2.0
-Minimal task tracker. Plain JSON in .tasks/ — no daemons, no runtime.
+tk 1.0.0
+Minimal task tracker. Append-only JSON records in .tasks/ — no daemons, no
+runtime.
 
 Usage: tk [FLAGS] <SUBCOMMAND>
 
@@ -13,7 +14,7 @@ Commands:
   add         Create a task
   archive     Archive a done/closed task without deleting it
   block       Add a blocker dependency
-  check       Check task integrity (non-zero exit on findings)
+  check       Check store integrity (non-zero exit on findings)
   checkpoint  Replace the current checkpoint (one summary, not the log)
               [aliases: ck]
   clean       Remove old completed tasks (archives by default)
@@ -31,9 +32,9 @@ Commands:
   mv          Move a task to a different project
   open        Reset a task status to open
   path        Print the resolved task store location
+  purge       Delete a task record [aliases: rm]
   ready       List active/open unblocked tasks [aliases: rdy]
-  remove      Delete a task [aliases: rm]
-  repair      Repair recorded inconsistencies in a task file
+  recover     Drop a record's torn last line (from an interrupted write)
   show        Show task details
   start       Start working on a task (open → active) [aliases: active]
   unarchive   Return an archived task to active views
@@ -75,11 +76,12 @@ Arguments:
 Flags:
   -p, --priority <PRIORITY>    Priority (0-4, p0-p4, or
                                none/urgent/high/medium/low)
-  -P, --project <PROJECT>      Project prefix
+  -P, --project <PROJECT>      Project (display grouping; identity is
+                               unaffected)
   -d, --desc <DESC>            Description
   -l, --labels <LABELS>        Labels (comma-separated, repeatable)
   -A, --assignees <ASSIGNEES>  Assignees (comma-separated, repeatable)
-      --parent <PARENT>        Parent task ID
+      --parent <PARENT>        Parent task (alias, ID, or ID prefix)
       --estimate <ESTIMATE>    Estimate (user-defined units)
       --due <DUE>              Due date (YYYY-MM-DD or relative +Nh/+Nd/+Nw/+Nm)
   -h, --help                   Print help
@@ -96,7 +98,7 @@ List tasks
 Usage: tk list [FLAGS] [SEARCH]…
 
 Arguments:
-  [SEARCH]…  Search title, description, and ID
+  [SEARCH]…  Search title, description, alias, and ID
 
 Flags:
   -a, --all                  Show all, including done and closed
@@ -139,7 +141,7 @@ Show task details
 Usage: tk show <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -156,7 +158,7 @@ Start working on a task (open → active)
 Usage: tk start <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -173,7 +175,7 @@ Reset a task status to open
 Usage: tk open <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -190,7 +192,7 @@ Defer a task
 Usage: tk defer <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -207,7 +209,7 @@ Complete a task
 Usage: tk done <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -224,7 +226,7 @@ Close/cancel a task
 Usage: tk close <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -241,16 +243,21 @@ Edit a task
 Usage: tk edit [FLAGS] <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -t, --title <TITLE>             New title
   -p, --priority <PRIORITY>       New priority
-  -l, --labels <LABELS>           Labels (+add, or replace; use --remove-label
-                                  to remove)
+  -l, --labels <LABELS>           Labels: `+add` a value, or bare values to
+                                  replace the set
+
+                                  A leading `-` is read as a flag by the shell
+                                  and this parser alike, so removal is
+                                  `--remove-label`; `-l +x` and `--labels=-x`
+                                  both work.
       --remove-label <REMOVE_LABEL>  Labels to remove (comma-separated)
-  -A, --assignees <ASSIGNEES>     Assignees (+add, or replace; use
-                                  --remove-assignee to remove)
+  -A, --assignees <ASSIGNEES>     Assignees: `+add` a value, or bare values to
+                                  replace the set
       --remove-assignee <REMOVE_ASSIGNEE>  Assignees to remove (comma-separated)
       --due <DUE>                 Due date (YYYY-MM-DD, relative, or - to clear)
       --parent <PARENT>           Parent task (or - to clear)
@@ -272,7 +279,7 @@ Replace the current checkpoint (one summary, not the log)
 Usage: tk checkpoint [--clear] [--if-rev <REV>] <ID> [TEXT]…
 
 Arguments:
-  <ID>     Task ID or ref
+  <ID>     Task alias, ID, or ID prefix
   [TEXT]…  Checkpoint text: current result, blocker, next action, verification
 
 Flags:
@@ -293,7 +300,7 @@ Add links to research, decisions, or source locations
 Usage: tk link <ID> [REFS]…
 
 Arguments:
-  <ID>     Task ID or ref
+  <ID>     Task alias, ID, or ID prefix
   [REFS]…  References to add (paths, URLs, task IDs); with none, list them
 
 Flags:
@@ -311,7 +318,7 @@ Remove links from a task
 Usage: tk unlink <ID> [REFS]…
 
 Arguments:
-  <ID>     Task ID or ref
+  <ID>     Task alias, ID, or ID prefix
   [REFS]…  References to remove
 
 Flags:
@@ -329,7 +336,7 @@ Add or show acceptance criteria
 Usage: tk accept [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
 Arguments:
-  <ID>       Task ID or ref
+  <ID>       Task alias, ID, or ID prefix
   [VALUES]…  Values to add; with none and no flags, list them
 
 Flags:
@@ -349,7 +356,7 @@ Add or show completion evidence
 Usage: tk evidence [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
 Arguments:
-  <ID>       Task ID or ref
+  <ID>       Task alias, ID, or ID prefix
   [VALUES]…  Values to add; with none and no flags, list them
 
 Flags:
@@ -369,7 +376,7 @@ Archive a done/closed task without deleting it
 Usage: tk archive [--if-rev <REV>] <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
       --if-rev <REV>     Reject the change unless the task still has this
@@ -388,7 +395,7 @@ Return an archived task to active views
 Usage: tk unarchive <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -h, --help             Print help
@@ -405,7 +412,7 @@ Add a log entry to a task
 Usage: tk log <ID> [MSG]…
 
 Arguments:
-  <ID>    Task ID or ref
+  <ID>    Task alias, ID, or ID prefix
   [MSG]…  Log message
 
 Flags:
@@ -423,8 +430,8 @@ Add a blocker dependency
 Usage: tk block <ID> <BLOCKER>
 
 Arguments:
-  <ID>       Task ID or ref to block
-  <BLOCKER>  Blocking task ID or ref
+  <ID>       Task to block (alias, ID, or ID prefix)
+  <BLOCKER>  Blocking task (alias, ID, or ID prefix)
 
 Flags:
   -h, --help             Print help
@@ -441,8 +448,8 @@ Remove a blocker dependency
 Usage: tk unblock <ID> <BLOCKER>
 
 Arguments:
-  <ID>       Task ID or ref
-  <BLOCKER>  Blocking task ID or ref to remove
+  <ID>       Task alias, ID, or ID prefix
+  <BLOCKER>  Blocking task to remove
 
 Flags:
   -h, --help             Print help
@@ -453,18 +460,22 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk remove ===
-Delete a task
+=== tk purge ===
+Delete a task record
 
-Usage: tk remove [-f --force] [--if-rev <REV>] <ID>
+Refuses while other tasks still reference it: those references would become
+dangling, and a broken graph is worse than a stale record.
+
+Usage: tk purge [FLAGS] <ID>
 
 Arguments:
-  <ID>  Task ID or ref
+  <ID>  Task alias, ID, or ID prefix
 
 Flags:
   -f, --force            Skip confirmation
+      --scrub            Delete anyway, removing the references that point at it
       --if-rev <REV>     Reject the delete unless the task still has this
-                         revision (`show --json`)
+                         revision
   -h, --help             Print help
 
 Global flags:
@@ -473,16 +484,19 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk repair ===
-Repair recorded inconsistencies in a task file
+=== tk recover ===
+Drop a record's torn last line, left behind by an interrupted write
 
-Usage: tk repair [--drop-missing] <ID>
+Only the incomplete final line is removed: it was never a complete event, so
+nothing that was appended is lost.
+
+Usage: tk recover [--dry-run] [ID]
 
 Arguments:
-  <ID>  Task ID or ref
+  [ID]  Task alias, ID, or ID prefix (default: every record)
 
 Flags:
-      --drop-missing     Also drop references to missing blocker/parent tasks
+      --dry-run          Report what would be dropped without changing anything
   -h, --help             Print help
 
 Global flags:
@@ -494,13 +508,13 @@ Global flags:
 === tk mv ===
 Move a task to a different project
 
-(Deliberate break from the Go version: `mv` moves tasks only. Renaming a whole
-project lives under `config project rename`.)
+Identity is unaffected: a move changes one display field, and no reference
+anywhere needs rewriting.
 
 Usage: tk mv <SOURCE> <PROJECT>
 
 Arguments:
-  <SOURCE>   Task ID or ref
+  <SOURCE>   Task alias, ID, or ID prefix
   <PROJECT>  Target project name
 
 Flags:
@@ -531,7 +545,7 @@ Global flags:
                                  exist (no discovery)
 
 === tk check ===
-Check task integrity
+Check store integrity
 
 Exits non-zero when anything is reported, so scripts and agents cannot mistake
 findings for success.
