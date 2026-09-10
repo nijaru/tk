@@ -895,6 +895,7 @@ fn previous_id_shadowing_a_live_task_is_reported() {
 
 // --- Lock guard for external sync -------------------------------------------
 
+#[cfg(unix)]
 #[test]
 fn lock_runs_a_command_and_propagates_its_status() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -929,6 +930,7 @@ fn lock_runs_a_command_and_propagates_its_status() {
     assert_eq!(out.status.code(), Some(7), "child status must propagate");
 }
 
+#[cfg(unix)]
 #[test]
 fn lock_scan_guards_every_store_under_a_root() {
     let root = tempfile::tempdir().expect("tempdir");
