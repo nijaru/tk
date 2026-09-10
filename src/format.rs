@@ -248,6 +248,9 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
         };
         lines.push(format!("Blockers:    {}{state}", t.blocker_refs.join(", ")));
     }
+    if !t.task.related.is_empty() {
+        lines.push(format!("Related:     {}", t.related_refs.join(", ")));
+    }
     if let Some(c) = &task.checkpoint {
         lines.push(String::new());
         lines.push(format!("Checkpoint:  {c}"));
@@ -349,6 +352,7 @@ mod tests {
                 attempt: 0,
                 parent: None,
                 blocked_by: vec![],
+                related: vec![],
                 estimate: None,
                 due_date: Some("2000-01-01".into()),
                 logs: vec![LogEntry {
@@ -368,6 +372,7 @@ mod tests {
             blocked_by_incomplete: false,
             unresolved_blockers: Vec::new(),
             blocker_refs: Vec::new(),
+            related_refs: Vec::new(),
             parent_ref: None,
             is_overdue: true,
             days_until_due: None,

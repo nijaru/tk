@@ -852,6 +852,7 @@ impl<'a> Txn<'a> {
                 attempt: 0,
                 parent: opts.parent.clone(),
                 blocked_by: Vec::new(),
+                related: Vec::new(),
                 estimate: opts.estimate,
                 due_date: opts.due_date.clone(),
                 logs: Vec::new(),
@@ -925,6 +926,29 @@ impl<'a> Txn<'a> {
         if found {
             self.store
                 .append(id, op::BLOCK_REMOVE, serde_json::json!([blocker]))?;
+        }
+        Ok((self.store.view_of(id)?, found))
+    }
+
+    /// Record a non-blocking relationship with another task.
+    ///
+    /// Both endpoints must exist. Stored one-way and not cycle-checked: it is a
+    /// "see also", not a constraint.
+    pub fn add_related(&self, id: &str, other: &str) -> Result<TaskView> {
+        if id == other {
+            return Err(StoreError::Msg("a task cannot be related to itself".into()));
+        }
+        self.require_task(other)?;
+        self.store
+            .append_and_view(id, op::RELATED_ADD, serde_json::json!([other]))
+    }
+
+    pub fn remove_related(&self, id: &str, other: &str) -> Result<(TaskView, bool)> {
+        let record = self.store.load(id)?;
+        let found = record.state.related.iter().any(|r| r == other);
+        if found {
+            self.store
+                .append(id, op::RELATED_REMOVE, serde_json::json!([other]))?;
         }
         Ok((self.store.view_of(id)?, found))
     }
@@ -1012,6 +1036,7 @@ impl<'a> Txn<'a> {
             }
             if record.state.blocked_by.iter().any(|b| b == id)
                 || record.state.parent.as_deref() == Some(id)
+                || record.state.related.iter().any(|r| r == id)
             {
                 referrers.push(record.id.clone());
             }
@@ -1032,6 +1057,11 @@ impl<'a> Txn<'a> {
             }
             if record.state.parent.as_deref() == Some(id) {
                 self.store.append(referrer, op::PARENT_CLEAR, Value::Null)?;
+                references_scrubbed += 1;
+            }
+            if record.state.related.iter().any(|r| r == id) {
+                self.store
+                    .append(referrer, op::RELATED_REMOVE, serde_json::json!([id]))?;
                 references_scrubbed += 1;
             }
         }
@@ -1194,6 +1224,11 @@ pub fn inconsistencies(ctx: &Ctx, record: &Record, expected_id: &str) -> Result<
             issues.push(format!("blocked by missing task {blocker}"));
         }
     }
+    for related in &record.state.related {
+        if !ctx.record_path(related).is_file() {
+            issues.push(format!("related to missing task {related}"));
+        }
+    }
     if let Some(parent) = &record.state.parent
         && !ctx.record_path(parent).is_file()
     {
@@ -1250,12 +1285,23 @@ pub fn enrich(ctx: &Ctx, record: &Record, index: &Index) -> TaskView {
             .map(|e| e.alias)
             .unwrap_or_else(|| short_id(p))
     });
+    let related_refs: Vec<String> = state
+        .related
+        .iter()
+        .map(|r| {
+            index
+                .lookup(ctx, r)
+                .map(|e| e.alias)
+                .unwrap_or_else(|| short_id(r))
+        })
+        .collect();
     let done = state.status.is_terminal();
     TaskView {
         rev: record.rev(),
         blocked_by_incomplete,
         unresolved_blockers,
         blocker_refs,
+        related_refs,
         parent_ref,
         is_overdue: timeutil::is_overdue(state.due_date.as_deref(), done),
         days_until_due: timeutil::days_until_due(state.due_date.as_deref(), done),
@@ -1682,6 +1728,7 @@ mod tests {
                 attempt: 0,
                 parent: None,
                 blocked_by: Vec::new(),
+                related: Vec::new(),
                 estimate: None,
                 due_date: None,
                 logs: Vec::new(),

@@ -77,6 +77,10 @@ pub enum Commands {
     Block(crate::commands::Block),
     /// Remove a blocker dependency
     Unblock(crate::commands::Unblock),
+    /// Record a non-blocking relationship with another task
+    Relate(crate::commands::Relate),
+    /// Remove a non-blocking relationship
+    Unrelate(crate::commands::Unrelate),
     /// Delete a task record
     #[usage(alias = "rm")]
     Purge(crate::commands::Purge),

@@ -80,6 +80,79 @@ impl RunWith<AppCtx> for Unblock {
     }
 }
 
+/// Record a non-blocking relationship with another task
+///
+/// `relate` is a "see also", not a constraint: it never blocks work and is
+/// never cycle-checked. Documents belong in `tk link`; this is for tasks.
+#[derive(Args)]
+pub struct Relate {
+    /// Task alias, ID, or ID prefix
+    pub id: String,
+    /// Task to relate to
+    pub other: String,
+}
+
+impl RunWith<AppCtx> for Relate {
+    type Output = miette::Result<()>;
+
+    fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let id = txn.resolve(&self.id).into_diagnostic()?;
+        let other = txn.resolve(&self.other).into_diagnostic()?;
+        let t = txn.add_related(&id, &other).into_diagnostic()?;
+        if ctx.json {
+            println!("{}", format::format_json(&t));
+        } else {
+            println!(
+                "Related {} to {}",
+                t.task.alias,
+                txn.alias_of(&other).unwrap_or_else(|| short(&other))
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Remove a non-blocking relationship
+#[derive(Args)]
+pub struct Unrelate {
+    /// Task alias, ID, or ID prefix
+    pub id: String,
+    /// Task to unrelate
+    pub other: String,
+}
+
+impl RunWith<AppCtx> for Unrelate {
+    type Output = miette::Result<()>;
+
+    fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let id = txn.resolve(&self.id).into_diagnostic()?;
+        let other = txn.resolve(&self.other).into_diagnostic()?;
+        let (t, found) = txn.remove_related(&id, &other).into_diagnostic()?;
+        if !found {
+            println!(
+                "{} is not related to {}",
+                t.task.alias,
+                txn.alias_of(&other).unwrap_or_else(|| short(&other))
+            );
+            return Ok(());
+        }
+        if ctx.json {
+            println!("{}", format::format_json(&t));
+        } else {
+            println!(
+                "Unrelated {} from {}",
+                t.task.alias,
+                txn.alias_of(&other).unwrap_or_else(|| short(&other))
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Display an ID compactly in human output.
 fn short(id: &str) -> String {
     id.chars().take(8).collect()

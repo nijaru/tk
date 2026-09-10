@@ -751,6 +751,88 @@ fn moving_a_task_keeps_its_identity_and_references() {
     assert_eq!(show_json(dir.path(), &blocker)["project"], "third");
 }
 
+// --- Related edges: task-to-task, not documents -----------------------------
+
+#[test]
+fn relate_records_a_non_blocking_edge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let (a_alias, a) = add_task(dir.path(), "alpha");
+    let (b_alias, b) = add_task(dir.path(), "beta");
+
+    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
+    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([b]));
+
+    // A relation is "see also", not a constraint: both stay ready.
+    let ready = ok_in(dir.path(), &["ready"]);
+    assert!(
+        ready.contains(&a_alias) && ready.contains(&b_alias),
+        "{ready}"
+    );
+
+    // Human output names the relation by alias.
+    let detail = ok_in(dir.path(), &["show", &a_alias]);
+    assert!(
+        detail.contains(&format!("Related:     {b_alias}")),
+        "{detail}"
+    );
+
+    // It is one-way: nothing was written to the other record.
+    assert_eq!(show_json(dir.path(), &b)["related"], serde_json::json!([]));
+
+    // Adding it twice does not duplicate it.
+    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
+    assert_eq!(
+        show_json(dir.path(), &a)["related"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    ok_in(dir.path(), &["unrelate", &a_alias, &b_alias]);
+    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([]));
+    ok_in(dir.path(), &["check"]);
+}
+
+#[test]
+fn purge_refuses_while_a_relation_points_at_the_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let (a_alias, a) = add_task(dir.path(), "alpha");
+    let (b_alias, b) = add_task(dir.path(), "beta");
+    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
+
+    let out = run_in(dir.path(), &["purge", &b_alias, "-f"]);
+    assert!(!out.status.success(), "a relation must hold the record");
+    assert!(record_path(dir.path(), &b).exists());
+
+    ok_in(dir.path(), &["purge", &b_alias, "-f", "--scrub"]);
+    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([]));
+    ok_in(dir.path(), &["check"]);
+}
+
+#[test]
+fn a_relation_to_a_missing_task_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let (a_alias, _) = add_task(dir.path(), "alpha");
+    let (b_alias, b) = add_task(dir.path(), "beta");
+    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
+
+    std::fs::remove_file(record_path(dir.path(), &b)).expect("remove related");
+    let out = run_in(dir.path(), &["check"]);
+    assert!(
+        !out.status.success(),
+        "a dangling relation must be reported"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("related to missing task"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 // --- Stale intent -----------------------------------------------------------
 
 #[test]

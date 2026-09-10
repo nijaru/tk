@@ -35,11 +35,13 @@ Commands:
   purge       Delete a task record [aliases: rm]
   ready       List active/open unblocked tasks [aliases: rdy]
   recover     Drop a record's torn last line (from an interrupted write)
+  relate      Record a non-blocking relationship with another task
   show        Show task details
   start       Start working on a task (open → active) [aliases: active]
   unarchive   Return an archived task to active views
   unblock     Remove a blocker dependency
   unlink      Remove links from a task
+  unrelate    Remove a non-blocking relationship
   help        Print this message or the help of the given subcommand(s)
 
 Flags:
@@ -450,6 +452,45 @@ Usage: tk unblock <ID> <BLOCKER>
 Arguments:
   <ID>       Task alias, ID, or ID prefix
   <BLOCKER>  Blocking task to remove
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk relate ===
+Record a non-blocking relationship with another task
+
+`relate` is a "see also", not a constraint: it never blocks work and is never
+cycle-checked. Documents belong in `tk link`; this is for tasks.
+
+Usage: tk relate <ID> <OTHER>
+
+Arguments:
+  <ID>     Task alias, ID, or ID prefix
+  <OTHER>  Task to relate to
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk unrelate ===
+Remove a non-blocking relationship
+
+Usage: tk unrelate <ID> <OTHER>
+
+Arguments:
+  <ID>     Task alias, ID, or ID prefix
+  <OTHER>  Task to unrelate
 
 Flags:
   -h, --help             Print help

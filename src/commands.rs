@@ -13,7 +13,7 @@ mod status;
 
 pub use add::Add;
 pub use config::Config;
-pub use deps::{Block, Unblock};
+pub use deps::{Block, Relate, Unblock, Unrelate};
 pub use detail::{Accept, Archive, Checkpoint, Evidence, Link, Unarchive, Unlink};
 pub use edit::Edit;
 pub use list::{List, Ready};

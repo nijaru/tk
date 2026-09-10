@@ -61,6 +61,8 @@ pub mod op {
     pub const EVIDENCE_SET: &str = "evidence.set";
     pub const BLOCK_ADD: &str = "block.add";
     pub const BLOCK_REMOVE: &str = "block.remove";
+    pub const RELATED_ADD: &str = "related.add";
+    pub const RELATED_REMOVE: &str = "related.remove";
     pub const PARENT_SET: &str = "parent.set";
     pub const PARENT_CLEAR: &str = "parent.clear";
     pub const ARCHIVED: &str = "archived";
@@ -384,6 +386,8 @@ fn apply(state: &mut Option<TaskState>, event: &Event) -> Result<()> {
         op::EVIDENCE_SET => s.evidence = text_list(&event.data)?,
         op::BLOCK_ADD => add_all(&mut s.blocked_by, &event.data)?,
         op::BLOCK_REMOVE => remove_all(&mut s.blocked_by, &event.data)?,
+        op::RELATED_ADD => add_all(&mut s.related, &event.data)?,
+        op::RELATED_REMOVE => remove_all(&mut s.related, &event.data)?,
         op::PARENT_SET => s.parent = Some(text(&event.data)?),
         op::PARENT_CLEAR => s.parent = None,
         op::ARCHIVED => s.archived_at = Some(event.ts.clone()),
@@ -459,6 +463,7 @@ mod tests {
                 attempt: 0,
                 parent: None,
                 blocked_by: Vec::new(),
+                related: Vec::new(),
                 estimate: None,
                 due_date: None,
                 logs: Vec::new(),
@@ -537,6 +542,21 @@ mod tests {
         ];
         let s = fold(&events).unwrap();
         assert_eq!(s.title, "survived");
+    }
+
+    #[test]
+    fn related_edges_fold_like_other_lists() {
+        let events = vec![
+            created(),
+            at(op::RELATED_ADD, json!(["01m25qbfqa26kxz59mxg4va3mq"]), "T1"),
+            at(op::RELATED_ADD, json!(["01m25qbfqa26kxz59mxg4va3mq"]), "T2"),
+            at(
+                op::RELATED_REMOVE,
+                json!(["01m25qbfqa26kxz59mxg4va3mq"]),
+                "T3",
+            ),
+        ];
+        assert!(fold(&events).unwrap().related.is_empty());
     }
 
     #[test]

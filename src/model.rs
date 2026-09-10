@@ -271,6 +271,10 @@ pub struct TaskState {
     pub parent: Option<String>,
     #[serde(default, deserialize_with = "null_vec")]
     pub blocked_by: Vec<String>,
+    /// Non-blocking task relationships: "see also", not "waits for". Stored
+    /// one-way; `links` stays reserved for documents.
+    #[serde(default, deserialize_with = "null_vec")]
+    pub related: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +326,9 @@ pub struct TaskView {
     /// Blockers that do not resolve to a record in the store.
     #[serde(default)]
     pub unresolved_blockers: Vec<String>,
+    /// The `related` list rendered as aliases, for the same reason as blockers.
+    #[serde(default)]
+    pub related_refs: Vec<String>,
     /// `blocked_by` rendered the way a person would type it: the blocker's
     /// alias when it resolves, otherwise a shortened ID.
     #[serde(default)]
