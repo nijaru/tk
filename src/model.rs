@@ -1,5 +1,7 @@
 //! The record: one entry, one JSON document, and nothing else.
 //!
+//! Nine keys, every one of them used by a real workflow or needed by `ready`.
+//!
 //! Measurement decided this shape. The content of a real store is short
 //! single-line strings — descriptions median 196 characters with 0% containing a
 //! newline, log messages median 326 with 1 in 337 containing one — so the format
@@ -98,14 +100,8 @@ pub struct Entry {
     pub done: Option<String>,
     #[serde(default, deserialize_with = "null_vec")]
     pub blocked_by: Vec<String>,
-    /// Replaceable summary of where things stand. The log is the history; this
-    /// is the current state of play.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// What must be true for this to count as done.
-    #[serde(default, deserialize_with = "null_vec")]
-    pub acceptance: Vec<String>,
-    /// What was done about it, oldest first.
+    /// What was done about it, oldest first. The last entry is the current state
+    /// of play, which is why there is no separate status field to go stale.
     #[serde(default, deserialize_with = "null_vec")]
     pub log: Vec<LogEntry>,
     /// Keys tk does not know. Preserved rather than dropped, so a field a human
@@ -125,8 +121,6 @@ impl Entry {
             updated: created,
             done: None,
             blocked_by: Vec::new(),
-            status: None,
-            acceptance: Vec::new(),
             log: Vec::new(),
             extra: serde_json::Map::new(),
         }
@@ -171,20 +165,19 @@ impl EntryView {
     }
 }
 
-/// The settings in `.tk.json`.
+/// The store file, `.tk.json`. It carries the layout version and nothing else:
+/// there is nothing to configure, and a settings file that only exists to hold
+/// defaults is a place for defaults to hide.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// On-disk layout version; this binary reads and writes [`crate::store::FORMAT`].
     pub format: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aliases: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             format: crate::store::FORMAT,
-            aliases: None,
         }
     }
 }
@@ -215,8 +208,6 @@ mod tests {
             updated: "2026-02-01T09:30:00Z".into(),
             done: None,
             blocked_by: vec!["b7c4".into()],
-            status: Some("Halfway".into()),
-            acceptance: vec!["parity test passes".into()],
             log: vec![LogEntry {
                 ts: "2026-01-10T09:00:00Z".into(),
                 msg: "Started with the JWT approach.".into(),
@@ -251,8 +242,6 @@ mod tests {
             "updated",
             "done",
             "blocked_by",
-            "status",
-            "acceptance",
             "log",
         ] {
             assert!(
@@ -277,8 +266,6 @@ mod tests {
                 "updated",
                 "done",
                 "blocked_by",
-                "status",
-                "acceptance",
                 "log"
             ],
             "key order is the file's shape"
@@ -297,18 +284,18 @@ mod tests {
             "updated": "u",
             "done": null,
             "blocked_by": null,
-            "acceptance": null,
             "log": null
         });
         let entry: Entry = serde_json::from_value(minimal).unwrap();
         assert!(entry.blocked_by.is_empty());
         assert!(entry.log.is_empty());
-        assert!(entry.status.is_none());
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(
-            !json.contains("status"),
-            "an unset status is omitted: {json}"
-        );
+        for key in ["status", "acceptance"] {
+            assert!(
+                !json.contains(key),
+                "{key} is not part of the record: {json}"
+            );
+        }
     }
 
     #[test]
@@ -341,7 +328,7 @@ mod tests {
         // which is what makes reserved fields unnecessary.
         let raw = serde_json::json!({
             "ref": "a7b3", "title": "t", "state": "open", "labels": [], "created": "c",
-            "updated": "u", "done": null, "blocked_by": [], "acceptance": [], "log": [],
+            "updated": "u", "done": null, "blocked_by": [], "log": [],
             "assignee": "nick", "future_field": 42
         });
         let entry: Entry = serde_json::from_value(raw).unwrap();

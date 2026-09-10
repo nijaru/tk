@@ -118,14 +118,11 @@ pub fn parse_err(what: impl Into<String>, err: impl ToString) -> StoreError {
 // ---------------------------------------------------------------------------
 
 pub const TASKS_DIR: &str = ".tasks";
-/// The store file: format version, plus aliases for `-C`.
+/// The store file: the layout version, and nothing else.
 pub const STORE_FILE: &str = ".tk.json";
 /// The layout this binary reads and writes. One JSON document per entry.
 pub const FORMAT: i64 = 3;
 const LOCK_FILE: &str = ".lock";
-/// Where a migration moves the files it consumed. A store that has been
-/// converted is still clean.
-const LEGACY_DIR: &str = "legacy";
 /// Written by a migration, listing old handles.
 const MIGRATION_FILE: &str = "MIGRATION.md";
 
@@ -210,19 +207,7 @@ impl Ctx {
             None => std::env::current_dir().map_err(StoreError::Io)?,
         };
         let cwd = Self::absolutize(&cwd)?;
-        let mut ctx = Self::walk(&cwd);
-        // Resolve `-C` against directory aliases.
-        if let Some(d) = dir
-            && let Some(alias_target) = ctx.read_alias(d)
-        {
-            let resolved = if Path::new(&alias_target).is_absolute() {
-                PathBuf::from(&alias_target)
-            } else {
-                ctx.root.join(&alias_target)
-            };
-            ctx = Self::walk(&resolved);
-        }
-        Ok(ctx)
+        Ok(Self::walk(&cwd))
     }
 
     /// Exact store directory: no walking, never created implicitly.
@@ -304,15 +289,6 @@ impl Ctx {
         }
     }
 
-    fn read_alias(&self, name: &str) -> Option<String> {
-        if !self.exists {
-            return None;
-        }
-        let data = fs::read(self.store_path()).ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&data).ok()?;
-        v.get("aliases")?.get(name)?.as_str().map(str::to_owned)
-    }
-
     /// Why this store is missing, phrased for the way it was selected.
     pub fn missing_store_error(&self) -> StoreError {
         if self.source.is_explicit() {
@@ -368,18 +344,6 @@ impl Ctx {
         // during this process (by `tk init`, or by a test) is still readable.
         if !self.tasks_dir.is_dir() {
             return Err(self.missing_store_error());
-        }
-        self.check_format()
-    }
-
-    /// Guard read commands: a store selected explicitly must exist, while an
-    /// undiscovered store simply has nothing to show.
-    pub fn require_for_read(&self) -> Result<()> {
-        if !self.tasks_dir.is_dir() {
-            if self.source.is_explicit() {
-                return Err(self.missing_store_error());
-            }
-            return Ok(());
         }
         self.check_format()
     }
@@ -573,8 +537,6 @@ pub struct Filter {
     pub label: String,
     /// `Some(true)` blocked only, `Some(false)` unblocked only.
     pub blocked: Option<bool>,
-    /// Open and unblocked: what can be started now.
-    pub ready: bool,
     /// Include done and dropped entries.
     pub include_closed: bool,
     pub limit: usize,
@@ -586,11 +548,8 @@ impl Filter {
         match self.state {
             Some(state) if entry.state != state => return false,
             Some(_) => {}
-            None if !self.include_closed && !self.ready && entry.state.is_closed() => return false,
+            None if !self.include_closed && entry.state.is_closed() => return false,
             None => {}
-        }
-        if self.ready && !view.is_ready() {
-            return false;
         }
         if let Some(blocked) = self.blocked
             && view.is_waiting() != blocked
@@ -611,11 +570,7 @@ impl Filter {
                 || entry
                     .labels
                     .iter()
-                    .any(|l| l.to_lowercase().contains(&needle))
-                || entry
-                    .status
-                    .as_deref()
-                    .is_some_and(|s| s.to_lowercase().contains(&needle));
+                    .any(|l| l.to_lowercase().contains(&needle));
             if !hit {
                 return false;
             }
@@ -627,10 +582,6 @@ impl Filter {
 impl<'a> Store<'a> {
     pub fn ctx(&self) -> &'a Ctx {
         self.ctx
-    }
-
-    pub fn config(&self) -> Result<Config> {
-        self.ctx.load_config()
     }
 
     /// Read every entry file. Unreadable files become issues, never silence.
@@ -657,16 +608,19 @@ impl<'a> Store<'a> {
                 continue;
             }
             if path.is_dir() {
-                if name != LEGACY_DIR {
-                    scan.issues
-                        .push(format!("{name}/: unexpected directory in the store"));
-                }
+                // Directories are never reported. tk writes files, so a directory
+                // cannot be debris from a crashed write, and a store may
+                // legitimately hold one: long-form documents attached to a task,
+                // named from a log entry, are the convention in place of the
+                // `links` field this design dropped. A migration's `legacy/` is
+                // the same shape.
                 continue;
             }
             if ids::parse_file_name(&name).is_none() {
                 // Anything else is reported rather than ignored: a temp file
-                // left by an interrupted write, a stray note, a directory named
-                // like an entry. Silence here is how debris accumulates while
+                // left by an interrupted write, or a stray note. Silence here is
+                // how debris accumulates while `check` keeps saying the store is
+                // fine.
                 // `check` keeps saying the store is fine.
                 scan.issues.push(format!(
                     "{name}: not a tk file (tk writes <ref>-<slug>.json and {STORE_FILE} here)"
@@ -759,12 +713,8 @@ impl<'a> Store<'a> {
     pub fn get(&self, input: &str) -> Result<EntryView> {
         let known = self.known()?;
         let r#ref = ids::resolve(&known, input)?;
-        let (path, entry) = self.load_only(&r#ref)?;
+        let (path, entry) = self.load(&r#ref)?;
         Ok(view_of(&entry, &file_name(&path), &known))
-    }
-
-    fn load_only(&self, r#ref: &str) -> Result<(PathBuf, Entry)> {
-        self.load(r#ref)
     }
 
     /// Every entry matching `filter`, oldest first, with the scan's issues.
@@ -889,10 +839,6 @@ impl<'a> Txn<'a> {
         self.store.ctx
     }
 
-    pub fn config(&self) -> Result<Config> {
-        self.store.config()
-    }
-
     pub fn known(&self) -> Result<Vec<Known>> {
         self.store.known()
     }
@@ -903,15 +849,6 @@ impl<'a> Txn<'a> {
 
     pub fn load(&self, r#ref: &str) -> Result<(PathBuf, Entry)> {
         self.store.load(r#ref)
-    }
-
-    /// Replace `.tk.json`.
-    pub fn update_config(&self, f: impl FnOnce(&mut Config)) -> Result<Config> {
-        let mut config = self.store.config()?;
-        f(&mut config);
-        let data = serde_json::to_string_pretty(&config).map_err(|e| parse_err(STORE_FILE, e))?;
-        atomic_write(&self.ctx().store_path(), format!("{data}\n").as_bytes())?;
-        Ok(config)
     }
 
     /// Mark the moment of a change. Every write should call this first.
@@ -1015,14 +952,6 @@ pub fn check_integrity(ctx: &Ctx) -> Result<Vec<String>> {
                 entry.state
             ));
         }
-        for (index, line) in entry.log.iter().enumerate() {
-            if line.msg.trim().is_empty() {
-                issues.push(format!("{name}: log entry {} has no message", index + 1));
-            }
-        }
-        if entry.labels.iter().any(|l| l.trim().is_empty()) {
-            issues.push(format!("{name}: has an empty label"));
-        }
     }
 
     issues.extend(cycles(&scan.entries));
@@ -1078,34 +1007,6 @@ fn cycles(entries: &[(PathBuf, Entry)]) -> Vec<String> {
     out
 }
 
-/// What a store the binary cannot read might have been.
-pub fn describe_store(ctx: &Ctx) -> String {
-    let mut lines = vec![format!(
-        "store: {} ({}, {})",
-        ctx.tasks_dir.display(),
-        ctx.source.name(),
-        if ctx.exists { "present" } else { "missing" }
-    )];
-    if ctx.exists {
-        match ctx.load_config() {
-            Ok(config) => lines.push(format!("format: {}", config.format)),
-            Err(e) => lines.push(format!("store file: {}", e.code())),
-        }
-        let count = fs::read_dir(&ctx.tasks_dir)
-            .map(|d| {
-                d.flatten()
-                    .filter(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        name.ends_with(".json") && ids::parse_file_name(&name).is_some()
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        lines.push(format!("entries: {count}"));
-    }
-    lines.join("\n")
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1115,42 +1016,6 @@ pub fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// Find every `.tasks/` at or under `root`, breadth-first.
-pub fn find_stores(root: &Path) -> Result<Vec<PathBuf>> {
-    const MAX_DEPTH: usize = 8;
-    let mut out = Vec::new();
-    let mut queue = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = queue.pop() {
-        if depth > MAX_DEPTH {
-            continue;
-        }
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(StoreError::Io(e)),
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if !kind.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            if name == ".git" {
-                continue;
-            }
-            if name == TASKS_DIR {
-                out.push(entry.path());
-                continue;
-            }
-            queue.push((entry.path(), depth + 1));
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 /// Write a file so a reader sees either the old contents or the new ones.
@@ -1180,10 +1045,7 @@ mod tests {
     fn store() -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().expect("temp dir");
         let ctx = Ctx::at_tasks_dir(dir.path().join(TASKS_DIR));
-        ctx.txn_init()
-            .expect("init")
-            .update_config(|_| {})
-            .expect("config");
+        ctx.txn_init().expect("init");
         (dir, ctx)
     }
 
@@ -1339,8 +1201,7 @@ mod tests {
             )
             .unwrap()
             .1;
-        a.labels = vec!["backend".into()];
-        a.status = Some("waiting on review".into());
+        a.labels = vec!["backend".into(), "needs-review".into()];
         txn.write(&a, None).unwrap();
         let b = txn.create("Beta", "2026-01-02T00:00:00Z").unwrap();
         let mut blocking = txn.load(&b.entry.r#ref).unwrap().1;
@@ -1379,7 +1240,8 @@ mod tests {
         );
         assert_eq!(
             count(Filter {
-                ready: true,
+                state: Some(State::Open),
+                blocked: Some(false),
                 ..Default::default()
             }),
             1,
@@ -1430,27 +1292,25 @@ mod tests {
 
     #[test]
     fn check_reports_debris_a_crashed_write_left_behind() {
-        // A temp file from an interrupted write, a stray note, and a directory
-        // that is not a migration's `legacy/`. None of these is an entry, and
-        // all of them used to be invisible to `check`.
+        // A temp file from an interrupted write and a stray file: neither is an
+        // entry, and both used to be invisible to `check`.
         let (_dir, ctx) = store();
         let txn = ctx.txn().unwrap();
         txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
         fs::write(ctx.tasks_dir.join(".tmp.9999-abcd"), "{").unwrap();
         fs::write(ctx.tasks_dir.join("NOTES.txt"), "scratch").unwrap();
-        fs::create_dir_all(ctx.tasks_dir.join("old")).unwrap();
 
         let issues = check_integrity(&ctx).unwrap();
         let all = issues.join("\n");
-        for expected in [".tmp.9999-abcd", "NOTES.txt", "old/"] {
+        for expected in [".tmp.9999-abcd", "NOTES.txt"] {
             assert!(all.contains(expected), "{expected} missing from:\n{all}");
         }
 
-        // A converted store is still clean: the migration's own artifacts are
-        // not debris.
+        // A directory is not debris: a store may hold documents beside its
+        // entries, and a migration's `legacy/` and `MIGRATION.md` are expected.
         fs::remove_file(ctx.tasks_dir.join(".tmp.9999-abcd")).unwrap();
         fs::remove_file(ctx.tasks_dir.join("NOTES.txt")).unwrap();
-        fs::remove_dir_all(ctx.tasks_dir.join("old")).unwrap();
+        fs::create_dir_all(ctx.tasks_dir.join("reports")).unwrap();
         fs::create_dir_all(ctx.tasks_dir.join("legacy")).unwrap();
         fs::write(ctx.tasks_dir.join("MIGRATION.md"), "# map").unwrap();
         assert!(
@@ -1545,9 +1405,8 @@ mod tests {
     #[test]
     fn init_is_idempotent_and_refuses_nothing_it_wrote() {
         let (_dir, ctx) = store();
-        let txn = ctx.txn_init().unwrap();
-        let config = txn.config().unwrap();
-        assert_eq!(config.format, FORMAT);
+        ctx.txn_init().unwrap();
+        assert_eq!(ctx.load_config().unwrap().format, FORMAT);
         assert!(ctx.tasks_dir.join(".gitignore").exists());
     }
 
@@ -1555,7 +1414,7 @@ mod tests {
     fn revocation_changes_when_the_content_does() {
         let mut entry = Entry::new("a7b3".into(), "t".into(), "2026-01-01T00:00:00Z".into());
         let before = fingerprint(&entry);
-        entry.status = Some("working".into());
+        entry.labels = vec!["working".into()];
         assert_ne!(fingerprint(&entry), before);
     }
 
@@ -1585,13 +1444,13 @@ mod tests {
         fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
         let (path, mut entry) = txn.load(&view.entry.r#ref).unwrap();
-        entry.status = Some("picked up".into());
+        entry.labels = vec!["picked-up".into()];
         Txn::touch(&mut entry, "2026-01-02T00:00:00Z");
         txn.write(&entry, Some(&path)).unwrap();
 
         let raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["assignee"], serde_json::json!("nick"));
-        assert_eq!(raw["status"], serde_json::json!("picked up"));
+        assert_eq!(raw["labels"], serde_json::json!(["picked-up"]));
     }
 }

@@ -6,17 +6,15 @@
 
 mod add;
 mod batch;
-mod config;
 mod edit;
 mod list;
 mod misc;
 
 pub use add::{Add, Init};
 pub use batch::Apply;
-pub use config::Config;
-pub use edit::{Accept, Block, Done, Drop, Edit, Label, Note, State, Status, Unblock};
+pub use edit::{Block, Done, Drop, Edit, Label, Note, Open, Unblock};
 pub use list::{List, Ready, Show};
-pub use misc::{Check, Lock, Purge, StorePath};
+pub use misc::{Check, Purge, StorePath};
 
 use miette::Result;
 
@@ -52,6 +50,13 @@ impl AppCtx {
             let envelope = crate::output::ok(command, data, rev, issues);
             println!("{}", crate::format::format_json(&envelope));
         } else {
+            // True but not fatal: a file that could not be parsed, a blocker
+            // that names nothing. The exit code stays zero — the read itself
+            // succeeded — but a human is told, because a read that quietly
+            // shows only the healthy entries is the read that lies.
+            for issue in &issues {
+                eprintln!("{}", crate::format::warning(issue, self.color));
+            }
             println!("{}", human());
         }
     }

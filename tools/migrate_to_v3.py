@@ -666,14 +666,6 @@ def build_document(entry: Entry, handle_map: dict[str, str], refs: set[str]) -> 
             blocked_by.append(target)
         entry.refs_remapped += 1
 
-    acceptance: list[str] = []
-    for item in entry.acceptance_raw or []:
-        text = entry_text(item)
-        if text is None:
-            entry.acceptance_skipped += 1
-        else:
-            acceptance.append(text)
-
     log: list[dict] = []
     for item in entry.logs:
         log.append(
@@ -682,14 +674,23 @@ def build_document(entry: Entry, handle_map: dict[str, str], refs: set[str]) -> 
                 "msg": as_text(item.get("msg")),
             }
         )
+    # v3 has no status, acceptance, or evidence field. Rather than drop what they
+    # held, each becomes a log entry, marked with where it came from.
+    checkpoint = as_text(entry.checkpoint).strip()
+    if checkpoint:
+        log.append({"ts": updated, "msg": f"status: {checkpoint}"})
+    for item in entry.acceptance_raw or []:
+        text = entry_text(item)
+        if text is None:
+            entry.acceptance_skipped += 1
+        else:
+            log.append({"ts": updated, "msg": f"acceptance: {text}"})
     for item in entry.evidence_raw or []:
         text = entry_text(item)
         if text is None:
             entry.evidence_skipped += 1
         else:
             log.append({"ts": updated, "msg": f"verified: {text}"})
-
-    checkpoint = as_text(entry.checkpoint).strip()
 
     document: dict = {}
     document["ref"] = entry.ref
@@ -700,9 +701,6 @@ def build_document(entry: Entry, handle_map: dict[str, str], refs: set[str]) -> 
     document["updated"] = updated
     document["done"] = done
     document["blocked_by"] = blocked_by
-    if checkpoint:
-        document["status"] = checkpoint
-    document["acceptance"] = acceptance
     document["log"] = log
 
     entry.document = document

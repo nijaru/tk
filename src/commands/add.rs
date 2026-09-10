@@ -50,15 +50,9 @@ pub struct Add {
     /// Labels, comma-separated
     #[usage(short = 'l', long, delimiter = ',')]
     pub label: Vec<String>,
-    /// What must be true for this to count as done
-    #[usage(long, delimiter = ',')]
-    pub accept: Vec<String>,
     /// A ref this task waits on
     #[usage(short = 'b', long = "blocked-by", value_name = "REF")]
     pub blocked_by: Vec<String>,
-    /// A short note about where things stand
-    #[usage(long)]
-    pub status: Option<String>,
     /// Print only the new ref
     #[usage(short = 'q', long)]
     pub quiet: bool,
@@ -70,11 +64,6 @@ impl Add {
         let mut view = ops::create(txn, &self.title, now)?;
         let edit = ops::Edit {
             labels: (!self.label.is_empty()).then(|| self.label.clone()),
-            status: self.status.clone().map(Some),
-            acceptance: ops::AcceptanceChange {
-                set: (!self.accept.is_empty()).then(|| self.accept.clone()),
-                ..Default::default()
-            },
             ..Default::default()
         };
         if !edit.is_empty() {

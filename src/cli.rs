@@ -1,6 +1,6 @@
 //! CLI root: global flags, subcommand dispatch, context construction.
 
-use usage::{Cli, Subcommands};
+use usage::{Cli, RunWith, Subcommands};
 
 use crate::store::Ctx as StoreCtx;
 
@@ -12,21 +12,37 @@ pub struct AppCtx {
 }
 
 /// Minimal task tracker. One JSON document per task in .tasks/ — no daemon, no
-/// index, no database.
+/// index, no database. Run with no arguments to see what is ready.
 #[derive(Cli)]
-#[usage(bin = "tk", version, run_with)]
+#[usage(bin = "tk", version)]
 pub struct Cli {
     /// Output as JSON
     #[usage(short = 'j', long, global)]
     pub json: bool,
-    /// Run in a different directory (or a configured alias)
+    /// Run in a different directory
     #[usage(short = 'C', long, global, value_name = "DIR")]
     pub dir: Option<String>,
     /// Task store directory: exact path, must already exist (no discovery)
     #[usage(long = "tasks-dir", global, value_name = "DIR")]
     pub tasks_dir: Option<String>,
+    /// What to do; with nothing, show what is ready
     #[usage(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+/// `tk` with no subcommand is not an error: it answers the question the tool
+/// exists for. usage-rs cannot generate that decision (an optional subcommand
+/// has a state nothing generated can resolve), so the root implements the
+/// dispatch itself.
+impl RunWith<AppCtx> for Cli {
+    type Output = miette::Result<()>;
+
+    fn run_with(self, ctx: AppCtx) -> Self::Output {
+        match self.command {
+            Some(command) => command.run_with(ctx),
+            None => crate::commands::Ready::default().run_with(ctx),
+        }
+    }
 }
 
 #[derive(Subcommands)]
@@ -51,21 +67,17 @@ pub enum Commands {
     /// Add a log entry
     #[usage(alias = "log")]
     Note(crate::commands::Note),
-    /// Replace the current status (the summary, not the log)
-    Status(crate::commands::Status),
-    /// Move a task to a state: open, done, or dropped
-    State(crate::commands::State),
     /// Mark a task done
     Done(crate::commands::Done),
     /// Drop a task without doing it
     Drop(crate::commands::Drop),
-    /// Change a task's labels
+    /// Reopen a done or dropped task
+    Open(crate::commands::Open),
+    /// Add or remove labels
     #[usage(alias = "tag")]
     Label(crate::commands::Label),
     /// Edit a task's fields in one write
     Edit(crate::commands::Edit),
-    /// Add or change what must be true for a task to be done
-    Accept(crate::commands::Accept),
     /// Add a blocker dependency
     Block(crate::commands::Block),
     /// Remove a blocker dependency
@@ -78,10 +90,6 @@ pub enum Commands {
     Check(crate::commands::Check),
     /// Print the resolved task store location
     Path(crate::commands::StorePath),
-    /// Run a command while holding the store mutation lock
-    Lock(crate::commands::Lock),
-    /// Show or change configuration
-    Config(crate::commands::Config),
     /// Apply a batch of intents from stdin under one lock
     Apply(crate::commands::Apply),
 }
@@ -90,7 +98,7 @@ pub fn run() -> miette::Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
     // Captured before the command is consumed by dispatch.
-    let command = cli.command.name();
+    let command = cli.command.as_ref().map_or("ready", |c| c.name());
     // Store errors convert through `?` rather than `into_diagnostic()`, which
     // would hide the concrete error type and lose the failure's kind.
     let result: miette::Result<()> = (|| {
@@ -100,7 +108,8 @@ pub fn run() -> miette::Result<()> {
             json,
             color: crate::format::use_color(),
         };
-        cli.run_command_with(ctx)
+        // A typo is still an error: only a real subcommand parses.
+        cli.run_with(ctx)
     })();
     match result {
         Ok(()) => Ok(()),
@@ -158,20 +167,16 @@ impl Commands {
             Self::Ready(_) => "ready",
             Self::Show(_) => "show",
             Self::Note(_) => "note",
-            Self::Status(_) => "status",
-            Self::State(_) => "state",
             Self::Done(_) => "done",
             Self::Drop(_) => "drop",
+            Self::Open(_) => "open",
             Self::Label(_) => "label",
             Self::Edit(_) => "edit",
-            Self::Accept(_) => "accept",
             Self::Block(_) => "block",
             Self::Unblock(_) => "unblock",
             Self::Purge(_) => "purge",
             Self::Check(_) => "check",
             Self::Path(_) => "path",
-            Self::Lock(_) => "lock",
-            Self::Config(_) => "config",
             Self::Apply(_) => "apply",
         }
     }

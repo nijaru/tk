@@ -8,8 +8,7 @@ use std::io::IsTerminal as _;
 
 use owo_colors::OwoColorize;
 
-use crate::model::{Config, EntryView, State};
-use crate::store::Ctx;
+use crate::model::{EntryView, State};
 use crate::timeutil;
 
 /// Color when stdout is a TTY and `NO_COLOR` is unset.
@@ -182,13 +181,6 @@ pub fn render_detail(view: &EntryView, color: bool) -> String {
             paint(color, &blockers, Style::Yellow).to_string(),
         );
     }
-    if let Some(status) = &entry.status {
-        field("status", status.clone());
-    }
-    for (index, item) in entry.acceptance.iter().enumerate() {
-        let label = if index == 0 { "accept" } else { "" };
-        field(label, format!("{}. {}", index + 1, item));
-    }
     field("file", paint(color, &view.file, Style::Dim).to_string());
     field("rev", paint(color, &view.rev, Style::Dim).to_string());
 
@@ -220,27 +212,6 @@ pub fn render_summary(view: &EntryView) -> String {
     )
 }
 
-/// What a store holds, and where it is.
-pub fn render_config(ctx: &Ctx, config: &Config, entries: usize) -> String {
-    let mut lines = vec![
-        format!("Store:   {}", ctx.tasks_dir.display()),
-        format!("Found:   {}", ctx.source.name()),
-        format!("Format:  {}", config.format),
-        format!("Entries: {entries}"),
-    ];
-    match &config.aliases {
-        Some(aliases) if !aliases.is_empty() => {
-            lines.push(String::new());
-            lines.push("Aliases:".to_owned());
-            for (name, path) in aliases {
-                lines.push(format!("  {name:<10} -> {path}"));
-            }
-        }
-        _ => {}
-    }
-    lines.join("\n")
-}
-
 /// A warning line, for issues that do not stop a command.
 pub fn warning(text: &str, color: bool) -> String {
     paint(color, &format!("warning: {text}"), Style::Yellow)
@@ -258,8 +229,6 @@ mod tests {
     fn view(title: &str) -> EntryView {
         let mut entry = Entry::new("a7b3".into(), title.into(), "2026-01-10T12:00:00Z".into());
         entry.labels = vec!["backend".into(), "api".into()];
-        entry.status = Some("Halfway".into());
-        entry.acceptance = vec!["parity test passes".into()];
         entry.log = vec![LogEntry {
             ts: "2026-01-10T09:00:00Z".into(),
             msg: "Started with the JWT approach.".into(),
@@ -328,10 +297,6 @@ mod tests {
             "open",
             "labels",
             "backend, api",
-            "status",
-            "Halfway",
-            "accept",
-            "1. parity test passes",
             "log",
             "Started with the JWT approach.",
             "a7b3-rewrite-the-auth-layer.json",
@@ -346,22 +311,18 @@ mod tests {
     }
 
     #[test]
-    fn detail_lists_acceptance_in_order_and_marks_missing_blockers() {
+    fn detail_marks_a_blocker_that_is_not_in_the_store() {
         let mut v = view("Alpha");
-        v.entry.acceptance = vec!["first".into(), "second".into()];
         v.entry.blocked_by = vec!["b7c4".into()];
         v.unresolved_blockers = vec!["b7c4".into()];
         v.blocking = vec!["b7c4".into()];
         let out = render_detail(&v, false);
-        assert!(out.contains("1. first"), "{out}");
-        assert!(out.contains("2. second"), "{out}");
         assert!(out.contains("not in this store: b7c4"), "{out}");
     }
 
     #[test]
     fn a_multi_line_value_stays_aligned() {
         let mut v = view("Alpha");
-        v.entry.status = Some("first line\nsecond line".into());
         v.entry.log = vec![LogEntry {
             ts: "2026-01-10T09:00:00Z".into(),
             msg: "one\ntwo\nthree".into(),
@@ -373,9 +334,9 @@ mod tests {
                 "every line is indented or the heading: {line:?}"
             );
         }
-        assert!(out.contains("first line"), "{out}");
-        assert!(out.contains("second line"), "{out}");
-        assert!(!out.contains("\nsecond"), "the newline is not printed");
+        assert!(out.contains("one"), "{out}");
+        assert!(out.contains("two"), "{out}");
+        assert!(!out.contains("\ntwo"), "the newline is not printed");
     }
 
     #[test]

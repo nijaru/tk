@@ -53,19 +53,17 @@ impl List {
                 (false, true) => Some(false),
                 (false, false) => None,
             },
-            ready: false,
             include_closed: self.all,
             limit: self.limit.unwrap_or(0),
         })
     }
 
-    pub fn run(self, ctx: &AppCtx, command: &'static str, ready: bool) -> miette::Result<()> {
+    pub fn run(self, ctx: &AppCtx, command: &'static str) -> miette::Result<()> {
         ctx.require_store()?;
-        let mut filter = self.filter()?;
-        filter.ready = ready;
+        let filter = self.filter()?;
         let store = ctx.store.store()?;
         let (views, issues) = store.list(&filter)?;
-        let human = format::render_list(&views, empty_hint(ready), ctx.color);
+        let human = format::render_list(&views, empty_hint(command == "ready"), ctx.color);
         ctx.emit(command, &views, None, issues, || human);
         Ok(())
     }
@@ -83,16 +81,13 @@ impl RunWith<AppCtx> for List {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        self.run(&ctx, "list", false)
+        self.run(&ctx, "list")
     }
 }
 
 /// List what can be started now: open, and not waiting on anything
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct Ready {
-    /// Also show what is blocked, marked
-    #[usage(long)]
-    pub all: bool,
     /// Search titles, labels, and status
     #[usage(short = 'q', long)]
     pub search: Option<String>,
@@ -108,17 +103,22 @@ impl RunWith<AppCtx> for Ready {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let list = List {
-            search: self.search,
-            all: false,
-            state: Some("open".into()),
-            label: self.label,
-            blocked: false,
-            unblocked: false,
-            limit: self.limit,
+        ctx.require_store()?;
+        // The same filter `list` would take, spelled out: open, and nothing in
+        // the way. `ready` is not a concept of its own.
+        let filter = Filter {
+            search: self.search.clone().unwrap_or_default(),
+            state: Some(State::Open),
+            label: self.label.clone().unwrap_or_default(),
+            blocked: Some(false),
+            include_closed: false,
+            limit: self.limit.unwrap_or(0),
         };
-        let _ = self.all;
-        list.run(&ctx, "ready", true)
+        let store = ctx.store.store()?;
+        let (views, issues) = store.list(&filter)?;
+        let human = format::render_list(&views, empty_hint(true), ctx.color);
+        ctx.emit("ready", &views, None, issues, || human);
+        Ok(())
     }
 }
 

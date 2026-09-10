@@ -7,6 +7,7 @@
 //! optimization — these tests assert that it is actually held across the
 //! read-modify-write, and that nothing is silently dropped.
 
+use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -42,20 +43,23 @@ fn aliases_resolve_in_help() {
 }
 
 #[test]
-fn a_bad_state_is_refused_where_a_human_reads_it() {
+fn a_bad_state_is_refused_before_it_is_written() {
+    // The CLI cannot express a bad state at all — `done`, `drop`, and `open`
+    // each carry their value — so the only way to ask for one is a batch.
     let (_tmp, dir) = store();
-    let r#ref = add(&dir, "Alpha");
-    let out = run_in(&dir, &["state", &r#ref, "active"]);
+    let out = apply(
+        &dir,
+        r#"{"intents": [{"op": "add", "title": "Alpha"}, {"op": "state", "ref": "alpha", "state": "active"}]}"#,
+    );
     assert!(!out.status.success());
-    let text = stderr(&out);
-    assert!(text.contains("invalid state"), "{text}");
-    // The machine kind must not lead the human message.
-    assert!(!text.starts_with("invalid_input"), "{text}");
-    // `active` was a v1 state, and the message says what to use instead.
-    assert!(text.contains("open, done, or dropped"), "{text}");
-    assert_eq!(
-        failure_code(&dir, &["state", &r#ref, "active"]),
-        "invalid_input"
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["error_code"], "invalid_input");
+    let message = envelope["issues"][0].as_str().unwrap();
+    assert!(message.contains("invalid state"), "{message}");
+    // Refused whole, before any write: an unrepresentable state costs nothing.
+    assert!(
+        payload(&dir, &["ls", "-a"]).as_array().unwrap().is_empty(),
+        "nothing was written"
     );
 }
 
@@ -167,6 +171,19 @@ fn store() -> (tempfile::TempDir, PathBuf) {
 // --- End-to-end ------------------------------------------------------------
 
 #[test]
+fn bare_tk_shows_what_is_ready() {
+    // The question the tool exists for should not need a subcommand.
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let bare = ok_in(&dir, &[]);
+    assert!(bare.contains("Alpha"), "{bare}");
+    assert_eq!(bare, ok_in(&dir, &["ready"]), "bare tk is tk ready");
+    assert!(bare.contains(&r#ref));
+    // A typo is still an error.
+    assert!(!run_in(&dir, &["lsit"]).status.success());
+}
+
+#[test]
 fn a_task_goes_from_open_to_done() {
     let (_tmp, dir) = store();
     let r#ref = add(&dir, "Rewrite the auth layer");
@@ -177,16 +194,12 @@ fn a_task_goes_from_open_to_done() {
     assert!(ok_in(&dir, &["ready"]).contains(&r#ref));
 
     ok_in(&dir, &["note", &r#ref, "started with", "the JWT approach"]);
-    ok_in(&dir, &["status", &r#ref, "halfway"]);
     ok_in(&dir, &["label", &r#ref, "+backend"]);
-    ok_in(&dir, &["accept", &r#ref, "parity test passes"]);
 
     let entry = read_entry(&dir, &r#ref);
     assert_eq!(entry["state"], "open");
-    assert_eq!(entry["status"], "halfway");
     assert_eq!(entry["labels"], serde_json::json!(["backend"]));
     assert_eq!(entry["log"][0]["msg"], "started with the JWT approach");
-    assert_eq!(entry["acceptance"][0], "parity test passes");
     assert_eq!(entry["done"], serde_json::Value::Null);
 
     let done = ok_in(&dir, &["done", &r#ref]);
@@ -201,7 +214,7 @@ fn a_task_goes_from_open_to_done() {
     assert!(!ok_in(&dir, &["ready"]).contains(&r#ref));
 
     // Reopening forgets the completion time.
-    ok_in(&dir, &["state", &r#ref, "open"]);
+    ok_in(&dir, &["open", &r#ref]);
     assert_eq!(read_entry(&dir, &r#ref)["done"], serde_json::Value::Null);
     assert!(ok_in(&dir, &["ready"]).contains(&r#ref));
     assert_eq!(
@@ -214,10 +227,6 @@ fn a_task_goes_from_open_to_done() {
 fn the_document_on_disk_is_the_documented_shape() {
     let (_tmp, dir) = store();
     let r#ref = add(&dir, "Rewrite the auth layer");
-    // A fresh entry has no status; the key is omitted rather than written empty.
-    let fresh = std::fs::read_to_string(entry_file(&dir, &r#ref)).unwrap();
-    assert!(!fresh.contains("\"status\""), "{fresh}");
-    ok_in(&dir, &["status", &r#ref, "halfway"]);
     let raw = std::fs::read_to_string(entry_file(&dir, &r#ref)).unwrap();
     assert!(raw.ends_with("}\n"), "a file ends with a newline: {raw:?}");
     // Read the order from the text: a parsed map sorts its keys.
@@ -237,12 +246,14 @@ fn the_document_on_disk_is_the_documented_shape() {
             "updated",
             "done",
             "blocked_by",
-            "status",
-            "acceptance",
             "log"
         ],
         "key order is part of the format"
     );
+    // Nothing the record no longer has may reappear.
+    for gone in ["status", "acceptance", "priority", "project", "description"] {
+        assert!(!raw.contains(&format!("\"{gone}\"")), "{gone} in {raw}");
+    }
     assert_eq!(
         entry_file(&dir, &r#ref)
             .file_name()
@@ -259,19 +270,7 @@ fn adding_an_entry_takes_everything_in_one_call() {
     let r#ref = add(&dir, "Alpha");
     let other = ok_in(
         &dir,
-        &[
-            "add",
-            "Beta",
-            "-q",
-            "-l",
-            "backend,api",
-            "--accept",
-            "works,is tested",
-            "--status",
-            "waiting on review",
-            "-b",
-            &r#ref,
-        ],
+        &["add", "Beta", "-q", "-l", "backend,api", "-b", &r#ref],
     )
     .trim()
     .to_owned();
@@ -279,11 +278,6 @@ fn adding_an_entry_takes_everything_in_one_call() {
 
     let entry = read_entry(&dir, &other);
     assert_eq!(entry["labels"], serde_json::json!(["api", "backend"]));
-    assert_eq!(
-        entry["acceptance"],
-        serde_json::json!(["works", "is tested"])
-    );
-    assert_eq!(entry["status"], "waiting on review");
     assert_eq!(entry["blocked_by"], serde_json::json!([r#ref]));
     assert!(!ok_in(&dir, &["ready"]).contains(&other), "it is blocked");
 }
@@ -313,7 +307,7 @@ fn blocking_gates_readiness_and_unblocking_restores_it() {
     assert!(!ok_in(&dir, &["ls"]).contains("[blocked]"));
 
     // Reopening the blocker blocks it again.
-    ok_in(&dir, &["state", &a, "open"]);
+    ok_in(&dir, &["open", &a]);
     assert!(ok_in(&dir, &["ls"]).contains("[blocked]"));
     ok_in(&dir, &["unblock", &b, &a]);
     assert!(!ok_in(&dir, &["ls"]).contains("[blocked]"));
@@ -352,24 +346,15 @@ fn editing_many_fields_happens_in_one_write() {
             &r#ref,
             "--title",
             "Alpha, revised",
-            "--status",
-            "blocked on review",
             "--add-label",
             "backend",
-            "--add-accept",
-            "parity test passes",
             "-n",
             "picked it up",
         ],
     );
     let after = read_entry(&dir, &r#ref);
     assert_eq!(after["title"], "Alpha, revised");
-    assert_eq!(after["status"], "blocked on review");
     assert_eq!(after["labels"], serde_json::json!(["backend"]));
-    assert_eq!(
-        after["acceptance"],
-        serde_json::json!(["parity test passes"])
-    );
     assert_eq!(after["log"][0]["msg"], "picked it up");
     assert_eq!(after["created"], before["created"], "created never moves");
     // The file does not move on a title change: the ref is the identity.
@@ -392,6 +377,40 @@ fn editing_many_fields_happens_in_one_write() {
         format!("{ref}-something-else.json", ref = r#ref)
     );
     assert_eq!(read_entry(&dir, &r#ref)["created"], before["created"]);
+}
+
+#[test]
+fn labels_change_by_delta_and_only_by_delta() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    ok_in(&dir, &["label", &r#ref, "+backend", "+api"]);
+    assert_eq!(
+        read_entry(&dir, &r#ref)["labels"],
+        serde_json::json!(["api", "backend"])
+    );
+    ok_in(&dir, &["label", &r#ref, "-backend"]);
+    assert_eq!(
+        read_entry(&dir, &r#ref)["labels"],
+        serde_json::json!(["api"])
+    );
+
+    // A bare label would silently replace someone else's set, so it is refused
+    // and the message says how to replace on purpose.
+    let out = run_in(&dir, &["label", &r#ref, "ops"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("delta"), "{text}");
+    assert!(text.contains("edit --label"), "{text}");
+    assert_eq!(
+        failure_code(&dir, &["label", &r#ref, "ops"]),
+        "invalid_input"
+    );
+    // Replacing is still possible, deliberately, in one write.
+    ok_in(&dir, &["edit", &r#ref, "-l", "ops"]);
+    assert_eq!(
+        read_entry(&dir, &r#ref)["labels"],
+        serde_json::json!(["ops"])
+    );
 }
 
 #[test]
@@ -449,6 +468,17 @@ fn a_purge_dry_run_changes_nothing() {
     assert!(read_entry(&dir, &r#ref)["title"].as_str().is_some());
 }
 
+#[test]
+fn path_names_the_store_it_resolved() {
+    let (_tmp, dir) = store();
+    add(&dir, "Alpha");
+    let text = ok_in(&dir, &["path"]);
+    assert!(text.contains(".tasks"), "{text}");
+    let data = payload(&dir, &["path"]);
+    assert_eq!(data["exists"], serde_json::json!(true));
+    assert_eq!(data["found"], serde_json::json!("discovered"));
+}
+
 // --- Format gate -----------------------------------------------------------
 
 #[test]
@@ -466,6 +496,9 @@ fn an_older_store_is_refused_with_the_reason_and_the_remedy() {
     assert!(text.contains("v1"), "{text}");
     assert!(text.contains("migrate_to_v3.py"), "{text}");
     assert_eq!(failure_code(&dir, &["ls"]), "not_a_store");
+    // `check` refuses it too, so it is safe as a pre-write guard.
+    assert!(!run_in(&dir, &["check"]).status.success());
+    assert_eq!(failure_code(&dir, &["check"]), "not_a_store");
 
     // A v0 layout: config.json.
     std::fs::remove_file(dir.join(".tasks/store.json")).unwrap();
@@ -506,9 +539,9 @@ fn error_codes_are_stable_and_machine_readable() {
         .as_str()
         .unwrap()
         .to_owned();
-    ok_in(&dir, &["status", &r#ref, "something changed"]);
+    ok_in(&dir, &["note", &r#ref, "something happened"]);
     assert_eq!(
-        failure_code(&dir, &["status", &r#ref, "again", "--if-rev", &rev]),
+        failure_code(&dir, &["note", &r#ref, "again", "--if-rev", &rev]),
         "stale_revision"
     );
     // The current revision is accepted.
@@ -516,26 +549,22 @@ fn error_codes_are_stable_and_machine_readable() {
         .as_str()
         .unwrap()
         .to_owned();
-    ok_in(&dir, &["status", &r#ref, "and again", "--if-rev", &rev]);
+    ok_in(&dir, &["note", &r#ref, "and again", "--if-rev", &rev]);
 
     assert_eq!(failure_code(&dir, &["show", "nope"]), "not_found");
-    // An ordinary failure has no payload, and still keeps every key.
-    let out = run_in(&dir, &["-j", "show", "nope"]);
-    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(envelope["data"], serde_json::Value::Null);
-    assert_eq!(envelope["issues"].as_array().unwrap().len(), 1);
     assert_eq!(failure_code(&dir, &["edit", &r#ref]), "invalid_input");
     assert_eq!(
-        failure_code(&dir, &["state", &r#ref, "silly"]),
+        failure_code(&dir, &["label", &r#ref, "bare"]),
         "invalid_input"
     );
+    assert_eq!(failure_code(&dir, &["note", &r#ref, "  "]), "invalid_input");
 }
 
 #[test]
 fn check_reports_findings_and_exits_nonzero() {
     let (_tmp, dir) = store();
     let a = add(&dir, "Alpha");
-    let b = add(&dir, "Beta");
+    let _ = add(&dir, "Beta");
 
     // Break the store by hand: a dangling blocker, a self-block, a stray file.
     let mut entry = read_entry(&dir, &a);
@@ -546,7 +575,6 @@ fn check_reports_findings_and_exits_nonzero() {
     )
     .unwrap();
     std::fs::write(dir.join(".tasks/stray.json"), "{}").unwrap();
-    let _ = b;
 
     let out = run_in(&dir, &["check"]);
     assert!(!out.status.success());
@@ -556,10 +584,8 @@ fn check_reports_findings_and_exits_nonzero() {
     }
     // The same findings travel in the failure's envelope.
     assert_eq!(failure_code(&dir, &["check"]), "check_failed");
-    let envelope: serde_json::Value = {
-        let out = run_in(&dir, &["-j", "check"]);
-        serde_json::from_str(&stdout(&out)).unwrap()
-    };
+    let out = run_in(&dir, &["-j", "check"]);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     let findings = envelope["data"]["findings"].as_array().unwrap();
     assert!(
         findings
@@ -568,6 +594,55 @@ fn check_reports_findings_and_exits_nonzero() {
         "{envelope}"
     );
     assert_eq!(envelope["data"]["clean"], serde_json::json!(false));
+}
+
+/// A store may hold documents the user put there; only files tk did not write
+/// are debris. Real stores do contain directories (long-form reports attached to
+/// a task), and `check` must not call those corruption.
+#[test]
+fn check_tolerates_a_directory_beside_the_entries() {
+    let (_tmp, dir) = store();
+    add(&dir, "Alpha");
+    std::fs::create_dir_all(dir.join(".tasks/reports")).unwrap();
+    std::fs::write(dir.join(".tasks/reports/alpha-notes.md"), "# notes").unwrap();
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+
+    // A file that is not an entry is still reported.
+    std::fs::write(dir.join(".tasks/.tmp.1234-abcd"), "{").unwrap();
+    assert!(!run_in(&dir, &["check"]).status.success());
+}
+
+#[test]
+fn a_broken_entry_is_reported_by_a_read_too() {
+    let (_tmp, dir) = store();
+    add(&dir, "Alpha");
+    std::fs::write(dir.join(".tasks/9zzz-broken.json"), "{not json").unwrap();
+
+    // The human path must not quietly show only the healthy entries.
+    let out = run_in(&dir, &["ls"]);
+    assert!(
+        stderr(&out).contains("9zzz-broken.json"),
+        "a read reports what it could not read: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "but the read itself succeeded");
+    assert!(
+        stdout(&out).contains("Alpha"),
+        "and still lists the healthy ones"
+    );
+    // The envelope carries the same issue for a machine.
+    let envelope = run_in(&dir, &["-j", "ls"]);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&envelope)).unwrap();
+    assert!(
+        envelope["issues"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("9zzz-broken.json"),
+        "{envelope}"
+    );
 }
 
 #[test]
@@ -593,11 +668,11 @@ fn a_hand_added_field_survives_a_tk_write() {
     entry["assignee"] = serde_json::json!("nick");
     std::fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
 
-    ok_in(&dir, &["status", &r#ref, "picked up"]);
+    ok_in(&dir, &["note", &r#ref, "picked up"]);
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(after["assignee"], serde_json::json!("nick"));
-    assert_eq!(after["status"], "picked up");
+    assert_eq!(after["log"][0]["msg"], "picked up");
     assert_eq!(
         ok_in(&dir, &["check"]).trim(),
         "ok: the store is consistent"
@@ -669,8 +744,7 @@ fn a_batch_and_the_commands_agree() {
         {"op": "add", "title": "Rewrite the auth layer"},
         {"op": "add", "title": "Write the parser"},
         {"op": "edit", "ref": "auth", "title": "Rewrite the auth layer, properly",
-         "status": "halfway", "add_labels": ["backend"],
-         "add_acceptance": ["parity test passes"], "note": "started"},
+         "add_labels": ["backend"], "note": "started"},
         {"op": "block", "ref": "parser", "blocker": "auth"},
         {"op": "state", "ref": "parser", "state": "dropped"}
     ]}"#;
@@ -686,18 +760,14 @@ fn a_batch_and_the_commands_agree() {
             &auth,
             "--title",
             "Rewrite the auth layer, properly",
-            "--status",
-            "halfway",
             "--add-label",
             "backend",
-            "--add-accept",
-            "parity test passes",
             "-n",
             "started",
         ],
     );
     ok_in(&cmd_dir, &["block", &parser, &auth]);
-    ok_in(&cmd_dir, &["state", &parser, "dropped"]);
+    ok_in(&cmd_dir, &["drop", &parser]);
 
     let documents = |dir: &Path| -> Vec<serde_json::Value> {
         let mut out: Vec<serde_json::Value> = payload(dir, &["ls", "-a"])
@@ -772,8 +842,13 @@ fn a_malformed_batch_is_refused_before_anything_is_written() {
     for bad in [
         "",
         "{not json",
+        // One shape only.
+        r#"[{"op": "add", "title": "Alpha"}]"#,
+        r#"{"ints": []}"#,
+        // Ops that no longer exist.
+        r#"{"intents": [{"op": "status", "ref": "a7b3", "text": "x"}]}"#,
         r#"{"intents": [{"op": "nope"}]}"#,
-        r#"[{"op": "note", "ref": "a7b3"}]"#,
+        r#"{"intents": [{"op": "note", "ref": "a7b3"}]}"#,
     ] {
         let out = apply(&dir, bad);
         assert!(!out.status.success(), "{bad:?} should fail");
@@ -783,21 +858,25 @@ fn a_malformed_batch_is_refused_before_anything_is_written() {
 
 // --- Concurrency ----------------------------------------------------------
 
-/// A lock held by another process makes a writer wait, because a mutation is a
-/// read-modify-write of a whole document.
+/// The lock is held by the test itself, not by a command: a mutation is a
+/// read-modify-write of a whole document, so a writer must wait for it, while a
+/// reader must not.
+///
+/// The lock is released from a second thread. Releasing it on this thread would
+/// deadlock: this thread waits for the writer, and the writer waits for the lock.
 #[test]
 fn a_held_lock_makes_a_writer_wait_but_not_a_reader() {
     let (_tmp, dir) = store();
-    let holder = Command::new(env!("CARGO_BIN_EXE_tk"))
-        .arg("-C")
-        .arg(&dir)
-        .args(["lock", "--", "sleep", "1"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn lock holder");
-    // Give the holder time to acquire the lock.
-    std::thread::sleep(Duration::from_millis(250));
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .open(dir.join(".tasks/.lock"))
+        .expect("open the lock file");
+    lock.lock().expect("take the store lock");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        let _ = lock.unlock();
+    });
 
     // A read does not take the lock, so it is fast.
     let started = Instant::now();
@@ -812,13 +891,12 @@ fn a_held_lock_makes_a_writer_wait_but_not_a_reader() {
     let started = Instant::now();
     let r#ref = add(&dir, "Waited for the lock");
     let waited = started.elapsed();
+    release.join().expect("release thread");
     assert!(
         waited >= Duration::from_millis(400),
         "the write waited ({waited:?})"
     );
     assert_eq!(read_entry(&dir, &r#ref)["title"], "Waited for the lock");
-
-    holder.wait_with_output().expect("holder exits");
 }
 
 /// Eight processes appending to one entry: with whole-file writes and a lock,
@@ -883,14 +961,12 @@ fn concurrent_opposite_blocks_never_create_a_loop() {
 }
 
 /// Concurrent label deltas: `+x` and `-y` are read-modify-write, so the lock is
-/// what keeps them all. A bare label *replaces* a set that was read earlier, so
-/// it can legitimately drop a concurrent delta — that boundary is documented,
-/// and this test pins the safe form.
+/// what keeps them all.
 #[test]
 fn concurrent_label_deltas_are_not_lost() {
     let (_tmp, dir) = store();
     let r#ref = add(&dir, "Contended");
-    ok_in(&dir, &["label", &r#ref, "base"]);
+    ok_in(&dir, &["edit", &r#ref, "-l", "base"]);
 
     let children: Vec<_> = (0..8)
         .map(|n| {
@@ -939,34 +1015,5 @@ fn concurrent_creates_allocate_unique_refs() {
     assert_eq!(
         ok_in(&dir, &["check"]).trim(),
         "ok: the store is consistent"
-    );
-}
-
-// --- Config ---------------------------------------------------------------
-
-#[test]
-fn config_shows_the_store_and_remembers_directory_aliases() {
-    let (_tmp, dir) = store();
-    add(&dir, "Alpha");
-    let text = ok_in(&dir, &["config"]);
-    assert!(text.contains("Format:  3"), "{text}");
-    assert!(text.contains("Entries: 1"), "{text}");
-
-    ok_in(&dir, &["config", "alias", "work", "/tmp"]);
-    let text = ok_in(&dir, &["config"]);
-    assert!(text.contains("work"), "{text}");
-    let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".tasks/.tk.json")).unwrap())
-            .unwrap();
-    assert_eq!(raw["format"], serde_json::json!(3));
-    assert_eq!(raw["aliases"]["work"], serde_json::json!("/tmp"));
-
-    ok_in(&dir, &["config", "alias", "work"]);
-    let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join(".tasks/.tk.json")).unwrap())
-            .unwrap();
-    assert!(
-        raw.get("aliases").is_none(),
-        "removing the last alias drops the map: {raw}"
     );
 }

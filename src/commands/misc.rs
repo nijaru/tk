@@ -1,4 +1,4 @@
-//! Deleting, checking, locating, and locking the store.
+//! Deleting, checking, and locating the store.
 
 use usage::{Args, RunWith};
 
@@ -126,37 +126,5 @@ impl RunWith<AppCtx> for StorePath {
             || path.clone(),
         );
         Ok(())
-    }
-}
-
-/// Run a command while holding the store mutation lock
-#[derive(Args, Debug)]
-pub struct Lock {
-    /// The command to run, after --
-    #[usage(value_name = "COMMAND", double_dash = "required", allow_hyphen_values)]
-    pub command: Vec<String>,
-}
-
-impl RunWith<AppCtx> for Lock {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        if self.command.is_empty() {
-            return Err(ctx.fail(
-                "lock",
-                crate::output::code::INVALID_INPUT,
-                "nothing to run: 'tk lock -- <command> [args...]'",
-                &serde_json::Value::Null,
-                Vec::new(),
-            ));
-        }
-        // The lock is released when this guard drops, or by the OS if the
-        // process exits below.
-        let _guard = ctx.store.lock_store()?;
-        let status = std::process::Command::new(&self.command[0])
-            .args(&self.command[1..])
-            .status()
-            .map_err(|e| miette::miette!("could not run {}: {e}", self.command[0]))?;
-        std::process::exit(status.code().unwrap_or(1));
     }
 }

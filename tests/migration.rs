@@ -243,31 +243,39 @@ fn a_v0_store_converts_to_the_documented_shape() {
     assert_eq!(done["state"], "done");
     assert_eq!(done["done"], serde_json::json!("2026-01-10T12:00:00Z"));
     assert_eq!(
-        done["status"],
-        serde_json::json!("nearly there"),
-        "checkpoint -> status"
-    );
-    assert_eq!(
         done["labels"],
         serde_json::json!(["api", "backend"]),
         "labels normalise"
     );
-    assert_eq!(
-        done["acceptance"],
-        serde_json::json!(["parity test passes", "docs updated"]),
-        "acceptance keeps strings and reads an object's text"
-    );
+    // Fields v3 does not have become marked log entries, so nothing is lost and
+    // nothing pretends to be something a reader can filter on.
+    for gone in ["status", "acceptance", "evidence", "checkpoint"] {
+        assert!(
+            done.get(gone).is_none(),
+            "{gone} is not part of the record: {done}"
+        );
+    }
     let log = done["log"].as_array().expect("a log");
+    let messages: Vec<&str> = log.iter().filter_map(|l| l["msg"].as_str()).collect();
+    assert!(messages.contains(&"status: nearly there"), "{messages:?}");
+    assert!(
+        messages.contains(&"acceptance: parity test passes"),
+        "{messages:?}"
+    );
+    assert!(
+        messages.contains(&"acceptance: docs updated"),
+        "an object's text is read: {messages:?}"
+    );
+    assert!(
+        messages.contains(&"verified: ran the full suite"),
+        "evidence -> log: {messages:?}"
+    );
     assert_eq!(log[0]["msg"], "did a thing", "a legacy log string is split");
     assert!(
         log[0]["ts"].as_str().unwrap().starts_with("2026-01-10"),
         "the date comes out of the string: {log:?}"
     );
     assert_eq!(log[1]["msg"], "second");
-    assert_eq!(
-        log[2]["msg"], "verified: ran the full suite",
-        "evidence -> log"
-    );
 
     // A blocker is remapped to the new store's ref for the same entry.
     let parser = entry_with_title(&store, "Write the parser");
@@ -316,13 +324,15 @@ fn a_v1_store_converts_by_folding_its_events() {
 
     let entry = entry_with_title(&store, "V1 thing");
     assert_eq!(entry["state"], "done", "the folded status");
-    assert_eq!(
-        entry["status"],
-        serde_json::json!("halfway"),
-        "checkpoint -> status"
-    );
     assert_eq!(entry["labels"], serde_json::json!(["backend"]));
-    assert_eq!(entry["acceptance"], serde_json::json!(["works"]));
+    let messages: Vec<&str> = entry["log"]
+        .as_array()
+        .expect("a log")
+        .iter()
+        .filter_map(|l| l["msg"].as_str())
+        .collect();
+    assert!(messages.contains(&"status: halfway"), "{messages:?}");
+    assert!(messages.contains(&"acceptance: works"), "{messages:?}");
     assert_eq!(entry["log"][0]["msg"], "first");
     assert_eq!(entry["log"][0]["ts"], "2026-03-02T00:00:00Z");
     assert!(

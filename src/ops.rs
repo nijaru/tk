@@ -72,36 +72,6 @@ pub fn create(txn: &Txn<'_>, title: &str, now: &str) -> Result<EntryView> {
     txn.create(title, now)
 }
 
-/// Replace the title. The file does not move: the slug is a creation-time
-/// mnemonic, not a function of the title.
-pub fn set_title(txn: &Txn<'_>, input: &str, title: &str, now: &str) -> Result<EntryView> {
-    let title = title.trim();
-    if title.is_empty() {
-        return Err(StoreError::EmptyTitle);
-    }
-    let mut change = Change::open(txn, input, None)?;
-    change.entry.title = title.to_owned();
-    change.save(txn, now)
-}
-
-/// Move the file to a new slug, keeping the ref.
-pub fn set_slug(txn: &Txn<'_>, input: &str, slug: &str, now: &str) -> Result<EntryView> {
-    let slug = ids::slug(slug);
-    let mut change = Change::open(txn, input, None)?;
-    change.slug = Some(slug);
-    change.save(txn, now)
-}
-
-/// Replace the current status; `None` clears it.
-///
-/// The status is the replaceable summary — where things stand now. The log is
-/// the history, and it is appended to, never rewritten.
-pub fn set_status(txn: &Txn<'_>, input: &str, text: Option<&str>, now: &str) -> Result<EntryView> {
-    let mut change = Change::open(txn, input, None)?;
-    change.entry.status = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
-    change.save(txn, now)
-}
-
 /// Append one log entry.
 pub fn add_log(txn: &Txn<'_>, input: &str, msg: &str, now: &str) -> Result<EntryView> {
     let msg = msg.trim();
@@ -184,14 +154,6 @@ fn normalize_labels(labels: &mut Vec<String>) {
     labels.dedup();
 }
 
-/// Replace the whole blocker set.
-pub fn set_blocked_by(txn: &Txn<'_>, input: &str, refs: &[String], now: &str) -> Result<EntryView> {
-    let mut change = Change::open(txn, input, None)?;
-    let resolved = resolve_blockers(txn, &change.r#ref, refs)?;
-    change.entry.blocked_by = resolved;
-    change.save(txn, now)
-}
-
 /// Add one blocker, refusing a loop.
 pub fn add_blocker(txn: &Txn<'_>, input: &str, blocker: &str, now: &str) -> Result<EntryView> {
     let mut change = Change::open(txn, input, None)?;
@@ -267,76 +229,6 @@ fn would_cycle(txn: &Txn<'_>, own: &str, blocker: &str) -> Result<Option<String>
     Ok(None)
 }
 
-/// Acceptance criteria: what must be true for this to count as done.
-#[derive(Debug, Default, Clone)]
-pub struct AcceptanceChange {
-    /// Replace the whole list.
-    pub set: Option<Vec<String>>,
-    pub add: Vec<String>,
-    pub remove: Vec<String>,
-    /// Drop every criterion.
-    pub clear: bool,
-}
-
-impl AcceptanceChange {
-    pub fn is_empty(&self) -> bool {
-        self.set.is_none() && self.add.is_empty() && self.remove.is_empty() && !self.clear
-    }
-}
-
-/// Change acceptance criteria in one write.
-pub fn edit_acceptance(
-    txn: &Txn<'_>,
-    input: &str,
-    change: &AcceptanceChange,
-    now: &str,
-) -> Result<EntryView> {
-    if change.is_empty() {
-        return Err(StoreError::InvalidInput(
-            "nothing to accept: give a criterion, --remove, --set, or --clear".into(),
-        ));
-    }
-    let mut entry_change = Change::open(txn, input, None)?;
-    let items = &mut entry_change.entry.acceptance;
-    if change.clear {
-        items.clear();
-    }
-    if let Some(set) = &change.set {
-        *items = trim_all(set);
-    }
-    for item in &change.add {
-        items.push(item.trim().to_owned());
-    }
-    for item in &change.remove {
-        let item = item.trim();
-        items.retain(|existing| !existing.eq_ignore_ascii_case(item));
-    }
-    items.retain(|item| !item.is_empty());
-    dedupe_preserving_order(items);
-    entry_change.save(txn, now)
-}
-
-fn trim_all(items: &[String]) -> Vec<String> {
-    items
-        .iter()
-        .map(|i| i.trim().to_owned())
-        .filter(|i| !i.is_empty())
-        .collect()
-}
-
-fn dedupe_preserving_order(items: &mut Vec<String>) {
-    let mut seen: Vec<String> = Vec::new();
-    items.retain(|item| {
-        let key = item.to_lowercase();
-        if seen.contains(&key) {
-            false
-        } else {
-            seen.push(key);
-            true
-        }
-    });
-}
-
 // ---------------------------------------------------------------------------
 // The multi-field edit
 // ---------------------------------------------------------------------------
@@ -346,12 +238,9 @@ fn dedupe_preserving_order(items: &mut Vec<String>) {
 pub struct Edit {
     pub title: Option<String>,
     pub slug: Option<String>,
-    /// `Some(None)` clears the status.
-    pub status: Option<Option<String>>,
     pub labels: Option<Vec<String>>,
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
-    pub acceptance: AcceptanceChange,
     pub blockers: Option<Vec<String>>,
     pub add_blockers: Vec<String>,
     pub remove_blockers: Vec<String>,
@@ -363,11 +252,9 @@ impl Edit {
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.slug.is_none()
-            && self.status.is_none()
             && self.labels.is_none()
             && self.add_labels.is_empty()
             && self.remove_labels.is_empty()
-            && self.acceptance.is_empty()
             && self.blockers.is_none()
             && self.add_blockers.is_empty()
             && self.remove_blockers.is_empty()
@@ -407,20 +294,13 @@ pub fn apply_edit(txn: &Txn<'_>, input: &str, edit: &Edit, now: &str) -> Result<
     if let Some(slug) = &edit.slug {
         change.slug = Some(ids::slug(slug));
     }
-    if let Some(status) = &edit.status {
-        change.entry.status = status
-            .as_ref()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-    }
     let label_changes = edit.label_changes();
     if !label_changes.is_empty() {
         apply_label_changes(&mut change.entry.labels, &label_changes);
     }
 
-    // Acceptance and blockers are resolved before anything is written, so a bad
-    // reference fails the whole edit rather than leaving half of it applied.
-    let acceptance = resolve_acceptance(&change.entry, &edit.acceptance);
+    // Blockers are resolved before anything is written, so a bad reference
+    // fails the whole edit rather than leaving half of it applied.
     let blockers = match (
         &edit.blockers,
         edit.add_blockers.is_empty(),
@@ -449,7 +329,6 @@ pub fn apply_edit(txn: &Txn<'_>, input: &str, edit: &Edit, now: &str) -> Result<
         (None, true, true) => None,
     };
 
-    change.entry.acceptance = acceptance;
     if let Some(blockers) = blockers {
         change.entry.blocked_by = blockers;
     }
@@ -466,26 +345,6 @@ pub fn apply_edit(txn: &Txn<'_>, input: &str, edit: &Edit, now: &str) -> Result<
         });
     }
     change.save(txn, now)
-}
-
-fn resolve_acceptance(entry: &Entry, change: &AcceptanceChange) -> Vec<String> {
-    let mut items = entry.acceptance.clone();
-    if change.clear {
-        items.clear();
-    }
-    if let Some(set) = &change.set {
-        items = trim_all(set);
-    }
-    for item in &change.add {
-        items.push(item.trim().to_owned());
-    }
-    for item in &change.remove {
-        let item = item.trim();
-        items.retain(|existing| !existing.eq_ignore_ascii_case(item));
-    }
-    items.retain(|item| !item.is_empty());
-    dedupe_preserving_order(&mut items);
-    items
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn a_log_keeps_every_entry_and_a_status_is_replaced() {
+    fn the_log_keeps_every_entry_in_order() {
         let (_dir, ctx) = store();
         let view = add(&ctx, "Alpha");
         let txn = ctx.txn().unwrap();
@@ -557,26 +416,12 @@ mod tests {
         assert_eq!(view.entry.log.len(), 2);
         assert_eq!(view.entry.log[0].ts, NOW);
         assert_eq!(view.entry.log[1].msg, "second");
+        assert_eq!(view.entry.updated, LATER, "the log is the record of change");
 
-        let view = set_status(&txn, &view.entry.r#ref, Some("waiting"), LATER).unwrap();
-        assert_eq!(view.entry.status.as_deref(), Some("waiting"));
-        let view = set_status(&txn, &view.entry.r#ref, Some("reviewing"), LATER).unwrap();
-        assert_eq!(
-            view.entry.status.as_deref(),
-            Some("reviewing"),
-            "replaced, not appended"
-        );
-        let view = set_status(&txn, &view.entry.r#ref, None, LATER).unwrap();
-        assert!(view.entry.status.is_none());
-    }
-
-    #[test]
-    fn an_empty_log_message_is_refused() {
-        let (_dir, ctx) = store();
-        let view = add(&ctx, "Alpha");
-        let txn = ctx.txn().unwrap();
+        // Nothing about the log is replaceable, so there is no second narrative
+        // to go stale or to disagree with it.
         assert!(matches!(
-            add_log(&txn, &view.entry.r#ref, "  ", NOW),
+            add_log(&txn, &view.entry.r#ref, "   ", NOW),
             Err(StoreError::InvalidInput(_))
         ));
     }
@@ -670,21 +515,18 @@ mod tests {
         add_blocker(&txn, &b.entry.r#ref, &a.entry.r#ref, NOW).unwrap();
         let store = ctx.store().unwrap();
         let ready = |f: Filter| store.list(&f).unwrap().0;
-        assert_eq!(
-            ready(Filter {
-                ready: true,
-                ..Default::default()
-            })
-            .len(),
-            1
-        );
+        // `ready` is open with nothing in the way — the same filter `tk ready`
+        // builds, not a concept of its own.
+        let startable = || Filter {
+            state: Some(State::Open),
+            blocked: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(ready(startable()).len(), 1);
 
         // Completing the blocker lets the blocked entry start.
         set_state(&txn, &a.entry.r#ref, State::Done, LATER).unwrap();
-        let ready = ready(Filter {
-            ready: true,
-            ..Default::default()
-        });
+        let ready = ready(startable());
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].entry.r#ref, b.entry.r#ref);
     }
@@ -710,80 +552,19 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_is_a_list_that_can_be_edited_in_place() {
-        let (_dir, ctx) = store();
-        let view = add(&ctx, "Alpha");
-        let txn = ctx.txn().unwrap();
-        let change = |set: Option<Vec<String>>, add: &[&str], remove: &[&str], clear: bool| {
-            AcceptanceChange {
-                set,
-                add: add.iter().map(|s| (*s).to_owned()).collect(),
-                remove: remove.iter().map(|s| (*s).to_owned()).collect(),
-                clear,
-            }
-        };
-        let out = edit_acceptance(
-            &txn,
-            &view.entry.r#ref,
-            &change(None, &["parity test passes", "docs updated"], &[], false),
-            NOW,
-        )
-        .unwrap();
-        assert_eq!(out.entry.acceptance.len(), 2);
-
-        let out = edit_acceptance(
-            &txn,
-            &view.entry.r#ref,
-            &change(None, &[], &["PARITY TEST PASSES"], false),
-            LATER,
-        )
-        .unwrap();
-        assert_eq!(
-            out.entry.acceptance,
-            ["docs updated"],
-            "removal ignores case"
-        );
-
-        let out = edit_acceptance(
-            &txn,
-            &view.entry.r#ref,
-            &change(Some(vec!["only this".into()]), &[], &[], false),
-            LATER,
-        )
-        .unwrap();
-        assert_eq!(out.entry.acceptance, ["only this"], "a set replaces");
-
-        let out = edit_acceptance(
-            &txn,
-            &view.entry.r#ref,
-            &change(None, &[], &[], true),
-            LATER,
-        )
-        .unwrap();
-        assert!(out.entry.acceptance.is_empty());
-    }
-
-    #[test]
     fn the_multi_field_edit_writes_once_and_orders_nothing_badly() {
         let (_dir, ctx) = store();
         let view = add(&ctx, "Alpha");
         let txn = ctx.txn().unwrap();
         let edit = Edit {
             title: Some("Alpha, revised".into()),
-            status: Some(Some("blocked on review".into())),
             add_labels: vec!["backend".into()],
-            acceptance: AcceptanceChange {
-                add: vec!["parity test passes".into()],
-                ..Default::default()
-            },
             note: Some("started".into()),
             ..Default::default()
         };
         let out = apply_edit(&txn, &view.entry.r#ref, &edit, LATER).unwrap();
         assert_eq!(out.entry.title, "Alpha, revised");
-        assert_eq!(out.entry.status.as_deref(), Some("blocked on review"));
         assert_eq!(out.entry.labels, ["backend"]);
-        assert_eq!(out.entry.acceptance, ["parity test passes"]);
         assert_eq!(out.entry.log.len(), 1);
         assert_eq!(out.entry.updated, LATER);
         assert_eq!(out.file, view.file, "a title change does not move the file");
@@ -836,28 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn set_slug_moves_the_file_without_changing_the_ref() {
-        let (_dir, ctx) = store();
-        let view = add(&ctx, "Alpha");
-        let old = ctx.tasks_dir.join(&view.file);
-        let txn = ctx.txn().unwrap();
-        let moved = set_slug(&txn, &view.entry.r#ref, "Something Else", LATER).unwrap();
-        assert_eq!(moved.entry.r#ref, view.entry.r#ref);
-        assert_eq!(
-            moved.file,
-            format!("{}-something-else.json", view.entry.r#ref)
-        );
-        assert!(!old.exists());
-    }
-
-    #[test]
     fn every_operation_refuses_a_stale_revision_without_writing() {
         let (_dir, ctx) = store();
         let view = add(&ctx, "Alpha");
         let txn = ctx.txn().unwrap();
         // The caller read an older revision.
         let mut change = Change::open(&txn, &view.entry.r#ref, None).unwrap();
-        change.entry.status = Some("x".into());
+        change.entry.labels = vec!["x".into()];
         change.save(&txn, LATER).unwrap();
 
         assert!(matches!(

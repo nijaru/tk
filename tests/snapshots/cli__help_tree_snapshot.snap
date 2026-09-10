@@ -5,37 +5,33 @@ expression: tree
 === tk ===
 tk 0.2.0
 Minimal task tracker. One JSON document per task in .tasks/ — no daemon, no
-index, no database.
+index, no database. Run with no arguments to see what is ready.
 
 Usage: tk [FLAGS] <SUBCOMMAND>
 
 Commands:
-  accept   Add or change what must be true for a task to be done
   add      Create a task [aliases: new]
   apply    Apply a batch of intents from stdin under one lock
   block    Add a blocker dependency
   check    Check store integrity (non-zero exit on findings) [aliases: ck]
-  config   Show or change configuration
   done     Mark a task done
   drop     Drop a task without doing it
   edit     Edit a task's fields in one write
   init     Create .tasks/ here
-  label    Change a task's labels [aliases: tag]
+  label    Add or remove labels [aliases: tag]
   list     List tasks [aliases: ls]
-  lock     Run a command while holding the store mutation lock
   note     Add a log entry [aliases: log]
+  open     Reopen a done or dropped task
   path     Print the resolved task store location
   purge    Delete a task [aliases: rm]
   ready    List what can be started now [aliases: rdy]
   show     Show one task
-  state    Move a task to a state: open, done, or dropped
-  status   Replace the current status (the summary, not the log)
   unblock  Remove a blocker dependency
   help     Print this message or the help of the given subcommand(s)
 
 Flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
   -h, --help             Print help
@@ -52,7 +48,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -66,15 +62,13 @@ Arguments:
 
 Flags:
   -l, --label <LABEL>     Labels, comma-separated
-      --accept <ACCEPT>   What must be true for this to count as done
   -b, --blocked-by <REF>  A ref this task waits on
-      --status <STATUS>   A short note about where things stand
   -q, --quiet             Print only the new ref
   -h, --help              Print help
 
 Global flags:
   -j, --json              Output as JSON
-  -C, --dir <DIR>         Run in a different directory (or a configured alias)
+  -C, --dir <DIR>         Run in a different directory
       --tasks-dir <DIR>   Task store directory: exact path, must already exist
                           (no discovery)
 
@@ -95,7 +89,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -105,7 +99,6 @@ List what can be started now
 Usage: tk ready [FLAGS]
 
 Flags:
-      --all              Also show what is blocked, marked
   -q, --search <SEARCH>  Search titles, labels, and status
   -l, --label <LABEL>    Only this label
   -n, --limit <LIMIT>    Show at most this many
@@ -113,7 +106,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -130,7 +123,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -150,48 +143,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk status ===
-Replace the current status (the summary, not the log)
-
-Usage: tk status [--clear] [--if-rev <REV>] <REF> [TEXT]…
-
-Arguments:
-  <REF>    Ref, or part of a title
-  [TEXT]…  Where things stand, in one line
-
-Flags:
-      --clear            Remove the status
-      --if-rev <REV>     Refuse if the entry changed since this revision was
-                         read
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk state ===
-Move a task to a state: open, done, or dropped
-
-Usage: tk state [--if-rev <REV>] <REF> <STATE>
-
-Arguments:
-  <REF>    Ref, or part of a title
-  <STATE>  open, done, or dropped
-
-Flags:
-      --if-rev <REV>     Refuse if the entry changed since this revision was
-                         read
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -210,7 +162,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -229,18 +181,17 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk label ===
-Change a task's labels
+=== tk open ===
+Reopen a done or dropped task
 
-Usage: tk label [--if-rev <REV>] <REF> <CHANGES>…
+Usage: tk open [--if-rev <REV>] <REF>
 
 Arguments:
-  <REF>       Ref, or part of a title
-  <CHANGES>…  +add, -remove, or a bare label to replace the whole set
+  <REF>  Ref, or part of a title
 
 Flags:
       --if-rev <REV>     Refuse if the entry changed since this revision was
@@ -249,7 +200,30 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk label ===
+Add or remove labels: +add, -remove
+
+Deltas only. Replacing a whole label set is `tk edit --label`, so a stray `tk
+label a7b3 urgent` cannot quietly drop the labels someone else added.
+
+Usage: tk label [--if-rev <REV>] <REF> <CHANGES>…
+
+Arguments:
+  <REF>       Ref, or part of a title
+  <CHANGES>…  +add or -remove
+
+Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -265,15 +239,9 @@ Flags:
   -t, --title <TITLE>             New title
       --slug <SLUG>               Move the file to a new slug (the ref never
                                   changes)
-      --status <STATUS>           Replace the status
-      --clear-status              Remove the status
   -l, --label <LABEL>             Replace the whole label set
       --add-label <ADD_LABEL>     Add labels
       --remove-label <REMOVE_LABEL>  Remove labels
-      --accept <ACCEPT>           Replace the acceptance criteria
-      --add-accept <ADD_ACCEPT>   Add acceptance criteria
-      --remove-accept <TEXT>      Remove acceptance criteria
-      --clear-accept              Remove every acceptance criterion
   -b, --blocked-by <REF>          Replace the blockers
       --add-block <REF>           Add one blocker
       --remove-block <REF>        Remove one blocker
@@ -284,33 +252,9 @@ Flags:
 
 Global flags:
   -j, --json                      Output as JSON
-  -C, --dir <DIR>                 Run in a different directory (or a configured
-                                  alias)
+  -C, --dir <DIR>                 Run in a different directory
       --tasks-dir <DIR>           Task store directory: exact path, must already
                                   exist (no discovery)
-
-=== tk accept ===
-Add or change what must be true for a task to be done
-
-Usage: tk accept [FLAGS] <REF> [CRITERIA]…
-
-Arguments:
-  <REF>        Ref, or part of a title
-  [CRITERIA]…  Criteria to add
-
-Flags:
-      --set <SET>        Replace the whole list
-      --remove <TEXT>    Remove a criterion
-      --clear            Remove every criterion
-      --if-rev <REV>     Refuse if the entry changed since this revision was
-                         read
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
 
 === tk block ===
 Add a blocker dependency
@@ -328,7 +272,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -348,7 +292,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -368,7 +312,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -383,7 +327,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -397,60 +341,7 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk lock ===
-Run a command while holding the store mutation lock
-
-Usage: tk lock [-- COMMAND]…
-
-Arguments:
-  [-- COMMAND]…  The command to run, after --
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config ===
-Show or change configuration
-
-Usage: tk config <SUBCOMMAND>
-
-Commands:
-  alias  Name a directory so -C can find it
-  help   Print this message or the help of the given subcommand(s)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config alias ===
-Name a directory so -C can find it
-
-Usage: tk config alias <NAME> [PATH]
-
-Arguments:
-  <NAME>  The name to type after -C
-  [PATH]  The directory it points at; omit to remove the alias
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -466,6 +357,6 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+  -C, --dir <DIR>        Run in a different directory
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)

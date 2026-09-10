@@ -13,18 +13,19 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{EntryView, State};
-use crate::ops::{self, AcceptanceChange, Edit};
+use crate::ops::{self, Edit};
 use crate::store::{Result, StoreError, Txn};
 
 /// One requested change.
 ///
-/// Serialized as `{"op": "...", ...}`. Unknown `op` values are refused by name;
-/// an unknown field inside a known op is ignored, which is why every optional
-/// field has a name an agent would guess.
+/// Serialized as `{"op": "...", ...}`. An unknown `op` is refused by name; an
+/// unknown field inside a known op is ignored, because serde cannot reject
+/// unknown fields in an internally tagged enum. A misspelled *required* field
+/// fails loudly, which is the case that matters.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
-// `Edit` carries every field any op can set, so it is much the largest variant.
-// Boxing it would not make the intent easier to read or to construct.
+// `Edit` carries every field any operation can set, so it is much the largest
+// variant. Boxing it would not make the intent easier to read or to construct.
 #[allow(clippy::large_enum_variant)]
 pub enum Intent {
     /// Create an entry, then apply anything else it carries.
@@ -33,25 +34,12 @@ pub enum Intent {
         #[serde(default)]
         labels: Vec<String>,
         #[serde(default)]
-        acceptance: Vec<String>,
-        #[serde(default)]
         blocked_by: Vec<String>,
-        #[serde(default)]
-        status: Option<String>,
     },
     Note {
         #[serde(rename = "ref")]
         r#ref: String,
         message: String,
-    },
-    Status {
-        #[serde(rename = "ref")]
-        r#ref: String,
-        #[serde(default)]
-        text: Option<String>,
-        /// Drop the status entirely.
-        #[serde(default)]
-        clear: bool,
     },
     State {
         #[serde(rename = "ref")]
@@ -66,23 +54,11 @@ pub enum Intent {
         #[serde(default)]
         slug: Option<String>,
         #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        clear_status: bool,
-        #[serde(default)]
         labels: Option<Vec<String>>,
         #[serde(default)]
         add_labels: Vec<String>,
         #[serde(default)]
         remove_labels: Vec<String>,
-        #[serde(default)]
-        acceptance: Option<Vec<String>>,
-        #[serde(default)]
-        add_acceptance: Vec<String>,
-        #[serde(default)]
-        remove_acceptance: Vec<String>,
-        #[serde(default)]
-        clear_acceptance: bool,
         #[serde(default)]
         blocked_by: Option<Vec<String>>,
         #[serde(default)]
@@ -107,18 +83,6 @@ pub enum Intent {
         r#ref: String,
         changes: Vec<String>,
     },
-    Accept {
-        #[serde(rename = "ref")]
-        r#ref: String,
-        #[serde(default)]
-        add: Vec<String>,
-        #[serde(default)]
-        remove: Vec<String>,
-        #[serde(default)]
-        set: Option<Vec<String>>,
-        #[serde(default)]
-        clear: bool,
-    },
     Purge {
         #[serde(rename = "ref")]
         r#ref: String,
@@ -130,29 +94,25 @@ impl Intent {
         match self {
             Self::Add { .. } => "add",
             Self::Note { .. } => "note",
-            Self::Status { .. } => "status",
             Self::State { .. } => "state",
             Self::Edit { .. } => "edit",
             Self::Block { .. } => "block",
             Self::Unblock { .. } => "unblock",
             Self::Label { .. } => "label",
-            Self::Accept { .. } => "accept",
             Self::Purge { .. } => "purge",
         }
     }
 
-    /// The ref this intent names, or the title for `add`.
+    /// What this intent is about, for an error message.
     fn subject(&self) -> String {
         match self {
             Self::Add { title, .. } => format!("{title:?}"),
             Self::Note { r#ref, .. }
-            | Self::Status { r#ref, .. }
             | Self::State { r#ref, .. }
             | Self::Edit { r#ref, .. }
             | Self::Block { r#ref, .. }
             | Self::Unblock { r#ref, .. }
             | Self::Label { r#ref, .. }
-            | Self::Accept { r#ref, .. }
             | Self::Purge { r#ref } => r#ref.clone(),
         }
     }
@@ -162,15 +122,9 @@ impl Intent {
             Self::Edit {
                 title,
                 slug,
-                status,
-                clear_status,
                 labels,
                 add_labels,
                 remove_labels,
-                acceptance,
-                add_acceptance,
-                remove_acceptance,
-                clear_acceptance,
                 blocked_by,
                 add_blockers,
                 remove_blockers,
@@ -179,20 +133,9 @@ impl Intent {
             } => Some(Edit {
                 title: title.clone(),
                 slug: slug.clone(),
-                status: match (clear_status, status) {
-                    (true, _) => Some(None),
-                    (false, Some(text)) => Some(Some(text.clone())),
-                    (false, None) => None,
-                },
                 labels: labels.clone(),
                 add_labels: add_labels.clone(),
                 remove_labels: remove_labels.clone(),
-                acceptance: AcceptanceChange {
-                    set: acceptance.clone(),
-                    add: add_acceptance.clone(),
-                    remove: remove_acceptance.clone(),
-                    clear: *clear_acceptance,
-                },
                 blockers: blocked_by.clone(),
                 add_blockers: add_blockers.clone(),
                 remove_blockers: remove_blockers.clone(),
@@ -203,62 +146,41 @@ impl Intent {
     }
 }
 
-/// A batch as it arrives: either `{"intents": [...]}` or a bare `[...]`.
+/// A batch: `{"intents": [...]}`.
 ///
 /// Parsed by hand rather than with `#[serde(untagged)]`, because that form
 /// reports every inner failure as "data did not match any variant", which hides
-/// the field an agent actually got wrong.
+/// the field an agent actually got wrong. One shape only — a second accepted
+/// spelling is a second thing to document, test, and get wrong.
 #[derive(Debug)]
-pub enum Batch {
-    Wrapped { intents: Vec<Intent>, dry_run: bool },
-    Bare(Vec<Intent>),
+pub struct Batch {
+    pub intents: Vec<Intent>,
 }
 
 impl Batch {
     pub fn parse(input: &str) -> Result<Self> {
         if input.trim().is_empty() {
             return Err(StoreError::InvalidInput(
-                "no batch on stdin: pipe {\"intents\": [...]} or a JSON array".into(),
+                "no batch on stdin: pipe {\"intents\": [...]}".into(),
             ));
         }
         let value: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| StoreError::InvalidInput(format!("batch is not valid JSON: {e}")))?;
-        match value {
-            serde_json::Value::Array(_) => {
-                let intents = parse_intents(value)?;
-                Ok(Self::Bare(intents))
-            }
-            serde_json::Value::Object(mut map) => {
-                let intents = map.remove("intents").ok_or_else(|| {
-                    StoreError::InvalidInput(
-                        "a batch object needs an \"intents\" array, or pass a bare array".into(),
-                    )
-                })?;
-                let dry_run = map
-                    .remove("dry_run")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                Ok(Self::Wrapped {
-                    intents: parse_intents(intents)?,
-                    dry_run,
-                })
-            }
-            _ => Err(StoreError::InvalidInput(
-                "a batch is a JSON object with \"intents\", or an array of intents".into(),
-            )),
-        }
+        let serde_json::Value::Object(mut map) = value else {
+            return Err(StoreError::InvalidInput(
+                "a batch is a JSON object with an \"intents\" array".into(),
+            ));
+        };
+        let intents = map
+            .remove("intents")
+            .ok_or_else(|| StoreError::InvalidInput("a batch needs an \"intents\" array".into()))?;
+        Ok(Self {
+            intents: parse_intents(intents)?,
+        })
     }
 
     pub fn intents(&self) -> &[Intent] {
-        match self {
-            Self::Wrapped { intents, .. } => intents,
-            Self::Bare(intents) => intents,
-        }
-    }
-
-    /// `--dry-run` on the command line, or `dry_run` inside the batch.
-    pub fn dry_run(&self, flag: bool) -> bool {
-        flag || matches!(self, Self::Wrapped { dry_run: true, .. })
+        &self.intents
     }
 }
 
@@ -305,11 +227,10 @@ pub const NOT_A_TRANSACTION: &str = "intents are applied in order under one lock
 
 /// Run a batch.
 ///
-/// Structural validation happens first and refuses the whole batch: an intent
-/// that could never run (unknown op, missing field) should not cost half a
-/// batch's worth of writes.
+/// A batch that cannot be parsed is refused before anything runs: an intent that
+/// could never run (unknown op, missing field) should not cost half a batch's
+/// worth of writes.
 pub fn run(txn: &Txn<'_>, batch: &Batch, dry_run: bool, now: &str) -> Result<Report> {
-    let dry_run = batch.dry_run(dry_run);
     let intents = batch.intents();
     if intents.is_empty() {
         return Err(StoreError::InvalidInput("the batch is empty".into()));
@@ -326,8 +247,8 @@ pub fn run(txn: &Txn<'_>, batch: &Batch, dry_run: bool, now: &str) -> Result<Rep
     for (index, intent) in intents.iter().enumerate() {
         if dry_run {
             // Resolve what must already exist, and say what would be written.
-            // Nothing here can check a loop that depends on an earlier intent in
-            // the same batch, because nothing is written.
+            // Nothing here can check a constraint that depends on an earlier
+            // intent in the same batch, because nothing is written.
             let entry = dry_run_entry(txn, intent, now)?;
             report.applied.push(Applied {
                 index,
@@ -366,27 +287,12 @@ fn run_one(txn: &Txn<'_>, intent: &Intent, now: &str) -> Result<EntryView> {
         Intent::Add {
             title,
             labels,
-            acceptance,
             blocked_by,
-            status,
         } => {
             let mut view = ops::create(txn, title, now)?;
-            if !labels.is_empty() || !acceptance.is_empty() || status.is_some() {
+            if !labels.is_empty() {
                 let edit = Edit {
-                    labels: if labels.is_empty() {
-                        None
-                    } else {
-                        Some(labels.clone())
-                    },
-                    status: status.clone().map(Some),
-                    acceptance: AcceptanceChange {
-                        set: if acceptance.is_empty() {
-                            None
-                        } else {
-                            Some(acceptance.clone())
-                        },
-                        ..Default::default()
-                    },
+                    labels: Some(labels.clone()),
                     ..Default::default()
                 };
                 view = ops::apply_edit(txn, &view.entry.r#ref, &edit, now)?;
@@ -397,10 +303,6 @@ fn run_one(txn: &Txn<'_>, intent: &Intent, now: &str) -> Result<EntryView> {
             Ok(view)
         }
         Intent::Note { r#ref, message } => ops::add_log(txn, r#ref, message, now),
-        Intent::Status { r#ref, text, clear } => {
-            let text = if *clear { None } else { text.as_deref() };
-            ops::set_status(txn, r#ref, text, now)
-        }
         Intent::State { r#ref, state } => ops::set_state(txn, r#ref, *state, now),
         Intent::Edit { r#ref, .. } => {
             let edit = intent.to_edit().expect("edit intent");
@@ -409,23 +311,6 @@ fn run_one(txn: &Txn<'_>, intent: &Intent, now: &str) -> Result<EntryView> {
         Intent::Block { r#ref, blocker } => ops::add_blocker(txn, r#ref, blocker, now),
         Intent::Unblock { r#ref, blocker } => ops::remove_blocker(txn, r#ref, blocker, now),
         Intent::Label { r#ref, changes } => ops::edit_labels(txn, r#ref, changes, now),
-        Intent::Accept {
-            r#ref,
-            add,
-            remove,
-            set,
-            clear,
-        } => ops::edit_acceptance(
-            txn,
-            r#ref,
-            &AcceptanceChange {
-                set: set.clone(),
-                add: add.clone(),
-                remove: remove.clone(),
-                clear: *clear,
-            },
-            now,
-        ),
         Intent::Purge { r#ref } => Ok(ops::purge(txn, r#ref)?.deleted),
     }
 }
@@ -475,19 +360,26 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_batch_and_a_bare_array_are_the_same_batch() {
-        let wrapped = batch(r#"{"intents": [{"op": "add", "title": "Alpha"}]}"#);
-        let bare = batch(r#"[{"op": "add", "title": "Alpha"}]"#);
-        assert_eq!(wrapped.intents().len(), 1);
-        assert_eq!(bare.intents().len(), 1);
-        assert!(!wrapped.dry_run(false));
-        assert!(batch(r#"{"intents": [], "dry_run": true}"#).dry_run(false));
-        assert!(bare.dry_run(true), "the command-line flag wins");
+    fn a_batch_has_one_shape() {
+        let parsed = batch(r#"{"intents": [{"op": "add", "title": "Alpha"}]}"#);
+        assert_eq!(parsed.intents().len(), 1);
+        // A bare array is not a batch: one spelling, one thing to document.
+        let error = Batch::parse(r#"[{"op": "add", "title": "Alpha"}]"#).unwrap_err();
+        assert!(format!("{error}").contains("intents"), "{error}");
     }
 
     #[test]
-    fn a_batch_that_is_not_json_is_refused_with_a_reason() {
-        for bad in ["", "   ", "{not json", r#"{"intents": [{"op": "nope"}]}"#] {
+    fn a_batch_that_is_not_a_batch_is_refused_with_a_reason() {
+        for bad in [
+            "",
+            "   ",
+            "{not json",
+            r#"{"ints": []}"#,
+            r#"{"intents": [{"op": "nope"}]}"#,
+            // Ops that no longer exist must be refused by name, not accepted.
+            r#"{"intents": [{"op": "status", "ref": "a7b3", "text": "x"}]}"#,
+            r#"{"intents": [{"op": "accept", "ref": "a7b3", "criteria": ["x"]}]}"#,
+        ] {
             let error = Batch::parse(bad).unwrap_err();
             assert!(
                 matches!(error, StoreError::InvalidInput(_)),
@@ -498,18 +390,18 @@ mod tests {
 
     #[test]
     fn a_missing_field_names_the_intent_that_is_incomplete() {
-        let error = Batch::parse(r#"[{"op": "note", "ref": "a7b3"}]"#).unwrap_err();
+        let error = Batch::parse(r#"{"intents": [{"op": "note", "ref": "a7b3"}]}"#).unwrap_err();
         let message = format!("{error}");
         assert!(message.contains("message"), "{message}");
     }
 
     #[test]
-    fn intents_run_in_order_and_write_once_each() {
+    fn intents_run_in_order() {
         let (_dir, ctx) = store();
         let text = r#"{"intents": [
-            {"op": "add", "title": "Alpha", "labels": ["backend"], "acceptance": ["works"]},
+            {"op": "add", "title": "Alpha", "labels": ["backend"]},
             {"op": "note", "ref": "alpha", "message": "started"},
-            {"op": "status", "ref": "alpha", "text": "halfway"},
+            {"op": "edit", "ref": "alpha", "title": "Alpha, revised"},
             {"op": "label", "ref": "alpha", "changes": ["+urgent"]}
         ]}"#;
         let txn = ctx.txn().unwrap();
@@ -519,10 +411,8 @@ mod tests {
         assert_eq!(report.not_attempted, 0);
 
         let entry = report.applied.last().unwrap().entry.clone();
-        assert_eq!(entry.entry.title, "Alpha");
+        assert_eq!(entry.entry.title, "Alpha, revised");
         assert_eq!(entry.entry.labels, ["backend", "urgent"]);
-        assert_eq!(entry.entry.status.as_deref(), Some("halfway"));
-        assert_eq!(entry.entry.acceptance, ["works"]);
         assert_eq!(entry.entry.log.len(), 1);
         assert_eq!(entry.entry.log[0].msg, "started");
         assert_eq!(entry.entry.updated, NOW);
@@ -539,8 +429,7 @@ mod tests {
             {"op": "add", "title": "Rewrite the auth layer"},
             {"op": "add", "title": "Write the parser"},
             {"op": "edit", "ref": "auth", "title": "Rewrite the auth layer, properly",
-             "status": "halfway", "add_labels": ["backend"],
-             "add_acceptance": ["parity test passes"], "note": "started"},
+             "add_labels": ["backend"], "note": "started"},
             {"op": "block", "ref": "parser", "blocker": "auth"},
             {"op": "state", "ref": "parser", "state": "dropped"}
         ]}"#;
@@ -555,12 +444,7 @@ mod tests {
             &auth.entry.r#ref,
             &Edit {
                 title: Some("Rewrite the auth layer, properly".into()),
-                status: Some(Some("halfway".into())),
                 add_labels: vec!["backend".into()],
-                acceptance: AcceptanceChange {
-                    add: vec!["parity test passes".into()],
-                    ..Default::default()
-                },
                 note: Some("started".into()),
                 ..Default::default()
             },
@@ -705,7 +589,7 @@ mod tests {
         let txn = ctx.txn().unwrap();
         let error = run(
             &txn,
-            &batch(r#"[{"op": "note", "ref": "nope", "message": "x"}]"#),
+            &batch(r#"{"intents": [{"op": "note", "ref": "nope", "message": "x"}]}"#),
             true,
             NOW,
         )
