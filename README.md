@@ -194,10 +194,16 @@ Intents are `add`, `note`, `status`, `state`, `edit`, `block`, `unblock`,
 matching command, so the two cannot disagree — a test runs both and compares the
 resulting documents field by field.
 
-The whole batch is validated before anything is written, and a batch that cannot
-be parsed costs no writes. It is **not** a transaction: intents are written one
-at a time in order, a failure stops the batch, and earlier intents stay applied.
-The report says so, and says how many intents were not attempted.
+A batch that cannot be parsed costs no writes: the shape of every intent is
+checked first. It is **not** a transaction, though. Intents are written one at a
+time in order, a failure stops the batch, and earlier intents stay applied. The
+report says so, and says how many intents were not attempted.
+
+`--dry-run` resolves the refs each intent names and reports what would happen,
+writing nothing. It cannot check a constraint that depends on an earlier intent
+in the same batch — a blocking loop created by two intents in one dry run is not
+caught, because nothing is written for the second to see. Running it for real
+does catch it, and refuses it.
 
 ## Store selection
 

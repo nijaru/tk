@@ -130,11 +130,19 @@ pub fn render_detail(view: &EntryView, color: bool) -> String {
         if value.is_empty() {
             return;
         }
+        // A value can contain a newline (a pasted status, a multi-line log
+        // message); align its continuation lines instead of letting them run
+        // back to column zero.
+        let mut parts = value.split('\n');
+        let first = parts.next().unwrap_or_default();
         lines.push(format!(
             "      {} {}",
             paint(color, &format!("{label:<8}"), Style::Dim),
-            value
+            first
         ));
+        for part in parts {
+            lines.push(format!("      {} {}", " ".repeat(8), part));
+        }
     };
 
     field(
@@ -188,11 +196,15 @@ pub fn render_detail(view: &EntryView, color: bool) -> String {
         lines.push(String::new());
         lines.push(paint(color, "      log", Style::Dim).to_string());
         for line in &entry.log {
+            let stamp = paint(color, &timeutil::format_date(&line.ts), Style::Dim);
+            let mut parts = line.msg.split('\n');
             lines.push(format!(
-                "        {}  {}",
-                paint(color, &timeutil::format_date(&line.ts), Style::Dim),
-                line.msg
+                "        {stamp}  {}",
+                parts.next().unwrap_or_default()
             ));
+            for part in parts {
+                lines.push(format!("                  {part}"));
+            }
         }
     }
     lines.join("\n")
@@ -344,6 +356,26 @@ mod tests {
         assert!(out.contains("1. first"), "{out}");
         assert!(out.contains("2. second"), "{out}");
         assert!(out.contains("not in this store: b7c4"), "{out}");
+    }
+
+    #[test]
+    fn a_multi_line_value_stays_aligned() {
+        let mut v = view("Alpha");
+        v.entry.status = Some("first line\nsecond line".into());
+        v.entry.log = vec![LogEntry {
+            ts: "2026-01-10T09:00:00Z".into(),
+            msg: "one\ntwo\nthree".into(),
+        }];
+        let out = render_detail(&v, false);
+        for line in out.lines() {
+            assert!(
+                line.is_empty() || line.starts_with(' ') || line.starts_with("a7b3"),
+                "every line is indented or the heading: {line:?}"
+            );
+        }
+        assert!(out.contains("first line"), "{out}");
+        assert!(out.contains("second line"), "{out}");
+        assert!(!out.contains("\nsecond"), "the newline is not printed");
     }
 
     #[test]

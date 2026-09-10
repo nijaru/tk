@@ -123,6 +123,11 @@ pub const STORE_FILE: &str = ".tk.json";
 /// The layout this binary reads and writes. One JSON document per entry.
 pub const FORMAT: i64 = 3;
 const LOCK_FILE: &str = ".lock";
+/// Where a migration moves the files it consumed. A store that has been
+/// converted is still clean.
+const LEGACY_DIR: &str = "legacy";
+/// Written by a migration, listing old handles.
+const MIGRATION_FILE: &str = "MIGRATION.md";
 
 /// Environment variable naming the task store directory (see `--tasks-dir`).
 pub const TASKS_DIR_ENV: &str = "TK_TASKS_DIR";
@@ -423,7 +428,7 @@ impl Ctx {
                 shown.push(format!("and {} more", strays.len() - 3));
             }
             return format!(
-                "found .json files whose names are not entry names (<ref>-<slug>.json): {}",
+                "found files whose names are not entry names (<ref>-<slug>.json): {}",
                 shown.join(", ")
             );
         }
@@ -643,19 +648,33 @@ impl<'a> Store<'a> {
         let mut paths: Vec<PathBuf> = Vec::new();
         for entry in dir.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Files tk writes, and the two a migration leaves behind.
+            if matches!(
+                name.as_str(),
+                STORE_FILE | LOCK_FILE | ".gitignore" | MIGRATION_FILE
+            ) {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".json") {
+            if path.is_dir() {
+                if name != LEGACY_DIR {
+                    scan.issues
+                        .push(format!("{name}/: unexpected directory in the store"));
+                }
                 continue;
             }
             if ids::parse_file_name(&name).is_none() {
-                if name != STORE_FILE {
-                    scan.issues.push(format!(
-                        "{name}: not an entry name (expected <ref>-<slug>.json)"
-                    ));
-                }
+                // Anything else is reported rather than ignored: a temp file
+                // left by an interrupted write, a stray note, a directory named
+                // like an entry. Silence here is how debris accumulates while
+                // `check` keeps saying the store is fine.
+                scan.issues.push(format!(
+                    "{name}: not a tk file (tk writes <ref>-<slug>.json and {STORE_FILE} here)"
+                ));
+                continue;
+            }
+            if !path.is_file() {
+                scan.issues.push(format!("{name}: not a regular file"));
                 continue;
             }
             paths.push(path);
@@ -1407,6 +1426,38 @@ mod tests {
         ] {
             assert!(all.contains(expected), "{expected} missing from:\n{all}");
         }
+    }
+
+    #[test]
+    fn check_reports_debris_a_crashed_write_left_behind() {
+        // A temp file from an interrupted write, a stray note, and a directory
+        // that is not a migration's `legacy/`. None of these is an entry, and
+        // all of them used to be invisible to `check`.
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
+        fs::write(ctx.tasks_dir.join(".tmp.9999-abcd"), "{").unwrap();
+        fs::write(ctx.tasks_dir.join("NOTES.txt"), "scratch").unwrap();
+        fs::create_dir_all(ctx.tasks_dir.join("old")).unwrap();
+
+        let issues = check_integrity(&ctx).unwrap();
+        let all = issues.join("\n");
+        for expected in [".tmp.9999-abcd", "NOTES.txt", "old/"] {
+            assert!(all.contains(expected), "{expected} missing from:\n{all}");
+        }
+
+        // A converted store is still clean: the migration's own artifacts are
+        // not debris.
+        fs::remove_file(ctx.tasks_dir.join(".tmp.9999-abcd")).unwrap();
+        fs::remove_file(ctx.tasks_dir.join("NOTES.txt")).unwrap();
+        fs::remove_dir_all(ctx.tasks_dir.join("old")).unwrap();
+        fs::create_dir_all(ctx.tasks_dir.join("legacy")).unwrap();
+        fs::write(ctx.tasks_dir.join("MIGRATION.md"), "# map").unwrap();
+        assert!(
+            check_integrity(&ctx).unwrap().is_empty(),
+            "{:?}",
+            check_integrity(&ctx).unwrap()
+        );
     }
 
     #[test]
