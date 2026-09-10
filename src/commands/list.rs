@@ -1,112 +1,155 @@
-//! `tk list` / `tk ready`
+//! `tk list` / `tk ready` / `tk show`
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::format;
-use crate::model::{Priority, Status, TaskView};
-use crate::store::ListOptions;
-
-use super::resolve;
+use crate::model::{EntryView, State};
+use crate::store::{Filter, Result};
 
 /// List tasks
-#[derive(Args)]
+#[derive(Args, Debug)]
 pub struct List {
-    /// Search title, description, alias, and ID
-    pub search: Vec<String>,
-    /// Show all, including done and closed
+    /// Search titles, labels, and status
+    #[usage(short = 'q', long)]
+    pub search: Option<String>,
+    /// Include done and dropped entries
     #[usage(short = 'a', long = "all")]
     pub all: bool,
-    /// Show archived tasks only
-    #[usage(long)]
-    pub archived: bool,
-    /// Filter by status (open/active/deferred/done/closed)
+    /// Only this state: open, done, or dropped
     #[usage(short = 's', long)]
-    pub status: Option<String>,
-    /// Filter by priority
-    #[usage(short = 'p', long)]
-    pub priority: Option<String>,
-    /// Filter by project
-    #[usage(short = 'P', long)]
-    pub project: Option<String>,
-    /// Filter by label
+    pub state: Option<String>,
+    /// Only this label
     #[usage(short = 'l', long)]
     pub label: Option<String>,
-    /// Filter by parent task
+    /// Only blocked entries; --no-blocked for unblocked only
     #[usage(long)]
-    pub parent: Option<String>,
-    /// Top-level tasks only
-    #[usage(long)]
-    pub roots: bool,
-    /// Limit results (default 20)
-    #[usage(short = 'n', long, default = "20")]
-    pub limit: i64,
+    pub blocked: bool,
+    /// Only unblocked entries
+    #[usage(long = "unblocked")]
+    pub unblocked: bool,
+    /// Show at most this many
+    #[usage(short = 'n', long)]
+    pub limit: Option<usize>,
+}
+
+impl List {
+    pub fn filter(&self) -> Result<Filter> {
+        let state = match &self.state {
+            Some(raw) => Some(State::parse(raw)?),
+            None => None,
+        };
+        Ok(Filter {
+            search: self.search.clone().unwrap_or_default(),
+            state,
+            label: self.label.clone().unwrap_or_default(),
+            blocked: match (self.blocked, self.unblocked) {
+                (true, true) => {
+                    return Err(crate::store::StoreError::InvalidInput(
+                        "--blocked and --unblocked are opposites; pick one".into(),
+                    ));
+                }
+                (true, false) => Some(true),
+                (false, true) => Some(false),
+                (false, false) => None,
+            },
+            ready: false,
+            include_closed: self.all,
+            limit: self.limit.unwrap_or(0),
+        })
+    }
+
+    pub fn run(self, ctx: &AppCtx, command: &'static str, ready: bool) -> miette::Result<()> {
+        ctx.require_store()?;
+        let mut filter = self.filter()?;
+        filter.ready = ready;
+        let store = ctx.store.store()?;
+        let (views, issues) = store.list(&filter)?;
+        let human = format::render_list(&views, empty_hint(ready), ctx.color);
+        ctx.emit(command, &views, None, issues, || human);
+        Ok(())
+    }
+}
+
+fn empty_hint(ready: bool) -> &'static str {
+    if ready {
+        "nothing ready: no open, unblocked entries"
+    } else {
+        "no entries"
+    }
 }
 
 impl RunWith<AppCtx> for List {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let tasks = run_list(&ctx, self)?;
-        let human = format::format_task_list(&tasks, "", ctx.color);
-        ctx.emit("list", &tasks, None, Vec::new(), || human);
-        Ok(())
+        self.run(&ctx, "list", false)
     }
 }
 
-pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<TaskView>> {
-    let status = cmd
-        .status
-        .map(|s| Status::parse(&s))
-        .transpose()
-        .into_diagnostic()?;
-    let priority = cmd
-        .priority
-        .map(|p| Priority::parse(&p))
-        .transpose()
-        .into_diagnostic()?;
-    let parent = cmd.parent.map(|p| resolve(ctx, &p)).transpose()?.map(Some);
-    let hide_terminal = !cmd.all && !cmd.archived && !status.is_some_and(|s| s.is_terminal());
-
-    let store = ctx.store.store()?;
-    Ok(store.list(&ListOptions {
-        search: cmd.search.join(" "),
-        hide_terminal,
-        status,
-        priority,
-        project: cmd.project.unwrap_or_default(),
-        label: cmd.label.unwrap_or_default(),
-        parent,
-        roots: cmd.roots,
-        include_archived: cmd.all || cmd.archived,
-        archived_only: cmd.archived,
-        limit: if cmd.all {
-            0
-        } else {
-            cmd.limit.max(0) as usize
-        },
-    })?)
+/// List what can be started now: open, and not waiting on anything
+#[derive(Args, Debug)]
+pub struct Ready {
+    /// Also show what is blocked, marked
+    #[usage(long)]
+    pub all: bool,
+    /// Search titles, labels, and status
+    #[usage(short = 'q', long)]
+    pub search: Option<String>,
+    /// Only this label
+    #[usage(short = 'l', long)]
+    pub label: Option<String>,
+    /// Show at most this many
+    #[usage(short = 'n', long)]
+    pub limit: Option<usize>,
 }
-
-/// List active/open tasks that nothing is blocking
-#[derive(Args)]
-pub struct Ready;
 
 impl RunWith<AppCtx> for Ready {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let store = ctx.store.store()?;
-        let tasks = store.list(&ListOptions::default())?;
-        let ready: Vec<TaskView> = tasks
-            .into_iter()
-            .filter(|t| {
-                matches!(t.task.status, Status::Open | Status::Active) && !t.blocked_by_incomplete
-            })
+        let list = List {
+            search: self.search,
+            all: false,
+            state: Some("open".into()),
+            label: self.label,
+            blocked: false,
+            unblocked: false,
+            limit: self.limit,
+        };
+        let _ = self.all;
+        list.run(&ctx, "ready", true)
+    }
+}
+
+/// Show one entry
+#[derive(Args, Debug)]
+pub struct Show {
+    /// Ref, or part of a title
+    pub r#ref: String,
+}
+
+impl Show {
+    pub fn view(ctx: &AppCtx, input: &str) -> Result<EntryView> {
+        ctx.store.store()?.get(input)
+    }
+}
+
+impl RunWith<AppCtx> for Show {
+    type Output = miette::Result<()>;
+
+    fn run_with(self, ctx: AppCtx) -> Self::Output {
+        ctx.require_store()?;
+        let view = Show::view(&ctx, &self.r#ref)?;
+        let issues: Vec<String> = view
+            .unresolved_blockers
+            .iter()
+            .map(|b| format!("{b} is named as a blocker but is not in this store"))
             .collect();
-        let human = format::format_task_list(&ready, "No ready tasks found. Good job!", ctx.color);
-        ctx.emit("ready", &ready, None, Vec::new(), || human);
+        let rev = Some(view.rev.clone());
+        ctx.emit("show", &view, rev, issues, || {
+            format::render_detail(&view, ctx.color)
+        });
         Ok(())
     }
 }

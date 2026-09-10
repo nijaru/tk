@@ -13,7 +13,8 @@ pub mod code {
     pub const NOT_FOUND: &str = "not_found";
     pub const AMBIGUOUS: &str = "ambiguous";
     pub const STALE_REVISION: &str = "stale_revision";
-    pub const NOT_A_V1_STORE: &str = "not_a_v1_store";
+    /// The directory is a task store, but not a format this binary reads.
+    pub const NOT_A_STORE: &str = "not_a_store";
     pub const STORE_NOT_FOUND: &str = "store_not_found";
     pub const INVALID_INPUT: &str = "invalid_input";
     pub const IO: &str = "io";

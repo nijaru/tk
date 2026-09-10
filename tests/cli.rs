@@ -1,19 +1,16 @@
-//! CLI-level tests: help drift, diagnostics, end-to-end flows, and the
-//! concurrency guarantees the store design is built around.
+//! CLI-level tests: help drift, error codes, end-to-end flows, and the
+//! concurrency behaviour the store design is built around.
 //!
-//! The concurrency tests are the interesting ones. v1 appends events with
-//! `O_APPEND` and takes the store lock only for operations that must see a
-//! consistent store, so these tests assert both halves of that split: plain
-//! appends proceed while another process holds the lock, and validation-
-//! dependent operations wait for it.
+//! The concurrency tests matter more than they did in v1. Now that a mutation
+//! rewrites a whole document, two writers that both read before either wrote can
+//! lose one of the changes, so the store lock is load-bearing rather than an
+//! optimization — these tests assert that it is actually held across the
+//! read-modify-write, and that nothing is silently dropped.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-
-use predicates::prelude::PredicateBooleanExt;
-use usage::RunWith as _;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tk::cli::Cli as TkCli;
 
@@ -29,59 +26,51 @@ fn help_tree_snapshot() {
 fn aliases_resolve_in_help() {
     // Users ask the way they type: alias paths must render the same page.
     let spec = TkCli::spec();
-    let via_alias = usage::test::help(spec, &["ls"], usage::test::Page::Long);
-    let via_name = usage::test::help(spec, &["list"], usage::test::Page::Long);
-    assert_eq!(via_alias, via_name);
-}
-
-#[test]
-fn diagnostics_read_like_users_see_them() {
-    let words = usage::test::argv(["add", "Some title", "-p", "bogus"]);
-    let cli = TkCli::parse_from(&words.words()).expect("priority is a string to the parser");
-    let err = cli
-        .command
-        .run_with(dummy_ctx())
-        .expect_err("bogus priority must fail");
-    assert!(err.to_string().contains("invalid priority"), "{err:?}");
-}
-
-fn dummy_ctx() -> tk::cli::AppCtx {
-    tk::cli::AppCtx {
-        store: tk::store::Ctx {
-            cwd: PathBuf::from("/nonexistent-tk-test"),
-            root: PathBuf::from("/nonexistent-tk-test"),
-            tasks_dir: PathBuf::from("/nonexistent-tk-test/.tasks"),
-            exists: false,
-            source: tk::store::StoreSource::Discovered,
-            worktree: false,
-        },
-        json: false,
-        color: false,
+    for (alias, name) in [
+        ("ls", "list"),
+        ("new", "add"),
+        ("rdy", "ready"),
+        ("log", "note"),
+        ("tag", "label"),
+        ("rm", "purge"),
+        ("ck", "check"),
+    ] {
+        let via_alias = usage::test::help(spec, &[alias], usage::test::Page::Long);
+        let via_name = usage::test::help(spec, &[name], usage::test::Page::Long);
+        assert_eq!(via_alias, via_name, "{alias} should be {name}");
     }
 }
 
-// --- End-to-end flows ------------------------------------------------------
-
-fn tk() -> assert_cmd::Command {
-    assert_cmd::Command::cargo_bin("tk").expect("tk binary")
+#[test]
+fn a_bad_state_is_refused_where_a_human_reads_it() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let out = run_in(&dir, &["state", &r#ref, "active"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("invalid state"), "{text}");
+    // The machine kind must not lead the human message.
+    assert!(!text.starts_with("invalid_input"), "{text}");
+    // `active` was a v1 state, and the message says what to use instead.
+    assert!(text.contains("open, done, or dropped"), "{text}");
+    assert_eq!(
+        failure_code(&dir, &["state", &r#ref, "active"]),
+        "invalid_input"
+    );
 }
 
-fn bin() -> Command {
+// --- Harness ---------------------------------------------------------------
+
+fn init(dir: &Path) {
+    let out = Command::new(env!("CARGO_BIN_EXE_tk"))
+        .args(["-C", &dir.display().to_string(), "init"])
+        .output()
+        .expect("spawn tk init");
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+}
+
+fn run_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tk"))
-}
-
-fn init_project(dir: &tempfile::TempDir, project: &str) {
-    tk().arg("-C")
-        .arg(dir.path())
-        .args(["init", "-P", project])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Initialized"));
-}
-
-/// Run tk in `dir` and return the raw output.
-fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    bin()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -89,1515 +78,895 @@ fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn tk")
 }
 
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 fn ok_in(dir: &Path, args: &[&str]) -> String {
     let out = run_in(dir, args);
     assert!(
         out.status.success(),
-        "tk {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "tk {args:?} failed: {}\n{}",
+        stdout(&out),
+        stderr(&out)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    stdout(&out)
 }
 
-fn store_dir(dir: &Path) -> PathBuf {
-    dir.join(".tasks")
-}
-
-fn records_dir(dir: &Path) -> PathBuf {
-    store_dir(dir).join("records")
-}
-
-/// Create a task and return `(alias, id)`.
-fn add_task(dir: &Path, title: &str) -> (String, String) {
-    let out = ok_in(dir, &["add", title]);
-    // "Created task <alias> (<id>)"
-    let rest = out
-        .trim()
-        .strip_prefix("Created task ")
-        .expect("created task line");
-    let (alias, id) = rest.split_once(" (").expect("alias and id");
-    (alias.to_owned(), id.trim_end_matches(')').to_owned())
-}
-
-/// Parse a `--json` run as the envelope every command answers with.
-fn envelope(dir: &Path, args: &[&str]) -> serde_json::Value {
-    let mut full = args.to_vec();
-    if !full.contains(&"--json") {
-        full.push("--json");
-    }
-    serde_json::from_str(&ok_in(dir, &full)).expect("json envelope")
-}
-
-/// Parse a `--json` run, unwrapping the envelope's payload.
+/// The `data` field of a successful `--json` envelope.
 fn payload(dir: &Path, args: &[&str]) -> serde_json::Value {
-    let mut full = args.to_vec();
-    if !full.contains(&"--json") {
-        full.push("--json");
+    let mut with_json = vec!["-j"];
+    with_json.extend_from_slice(args);
+    let text = ok_in(dir, &with_json);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
+    assert_eq!(envelope["ok"], serde_json::json!(true), "{text}");
+    // One shape everywhere: a reader indexes the same keys on every command.
+    for key in ["ok", "command", "rev", "data", "issues", "error_code"] {
+        assert!(envelope.get(key).is_some(), "{key} missing from {text}");
     }
-    envelope(dir, &full)["data"].clone()
+    envelope["data"].clone()
 }
 
-fn show_json(dir: &Path, id: &str) -> serde_json::Value {
-    payload(dir, &["show", id])
+/// The `error_code` of a failing `--json` envelope.
+fn failure_code(dir: &Path, args: &[&str]) -> String {
+    let mut with_json = vec!["-j"];
+    with_json.extend_from_slice(args);
+    let out = run_in(dir, &with_json);
+    assert!(!out.status.success(), "expected failure for {args:?}");
+    let text = stdout(&out);
+    let envelope: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("not JSON: {e}\nstdout: {text}\nstderr: {}", stderr(&out)));
+    assert_eq!(envelope["ok"], serde_json::json!(false));
+    // The same key set as a success, so a reader never shape-checks. `data` may
+    // carry the structured result of the failure (`check`'s findings, `apply`'s
+    // report); a plain failure leaves it null.
+    for key in ["ok", "command", "rev", "data", "issues", "error_code"] {
+        assert!(envelope.get(key).is_some(), "{key} missing from {text}");
+    }
+    envelope["error_code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
 }
 
-fn list_json(dir: &Path, args: &[&str]) -> Vec<serde_json::Value> {
-    let mut full = vec!["list", "-a"];
-    full.extend_from_slice(args);
-    payload(dir, &full).as_array().cloned().unwrap_or_default()
+fn add(dir: &Path, title: &str) -> String {
+    ok_in(dir, &["add", title, "-q"]).trim().to_owned()
 }
 
-fn record_path(dir: &Path, id: &str) -> PathBuf {
-    records_dir(dir).join(format!("{id}.jsonl"))
+fn entry_file(dir: &Path, r#ref: &str) -> PathBuf {
+    let tasks = dir.join(".tasks");
+    std::fs::read_dir(&tasks)
+        .expect("read store")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("{ref}-")))
+        })
+        .unwrap_or_else(|| panic!("no file for {ref}"))
 }
 
-/// Every event line of a record, parsed.
-fn read_events(dir: &Path, id: &str) -> Vec<serde_json::Value> {
-    let raw = std::fs::read_to_string(record_path(dir, id)).expect("record file");
-    raw.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("event line"))
-        .collect()
+fn read_entry(dir: &Path, r#ref: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(entry_file(dir, r#ref)).expect("read entry");
+    serde_json::from_str(&text).expect("parse entry")
 }
 
-/// Append an event the way a concurrent writer or a hand edit would.
-fn append_event(dir: &Path, id: &str, op: &str, data: serde_json::Value) {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(record_path(dir, id))
-        .expect("open record");
-    let line = serde_json::json!({
-        "ts": "2026-01-10T00:00:00.000000000Z",
-        "writer": "test-0000",
-        "op": op,
-        "data": data,
-    });
-    writeln!(file, "{line}").expect("append event");
+fn store() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    init(&path);
+    (dir, path)
 }
 
-/// Collapse miette's box drawing and line wrapping so diagnostics can be
-/// matched by their words rather than their layout.
-fn flatten(text: &str) -> String {
-    text.replace(
-        [
-            '│', '┌', '┐', '└', '┘', '├', '┤', '─', '╰', '╭', '╯', '╮', '┬', '┴', '┼',
+// --- End-to-end ------------------------------------------------------------
+
+#[test]
+fn a_task_goes_from_open_to_done() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Rewrite the auth layer");
+    assert_eq!(r#ref.len(), 4);
+
+    // Open, unblocked, and visible.
+    assert!(ok_in(&dir, &["ls"]).contains("Rewrite the auth layer"));
+    assert!(ok_in(&dir, &["ready"]).contains(&r#ref));
+
+    ok_in(&dir, &["note", &r#ref, "started with", "the JWT approach"]);
+    ok_in(&dir, &["status", &r#ref, "halfway"]);
+    ok_in(&dir, &["label", &r#ref, "+backend"]);
+    ok_in(&dir, &["accept", &r#ref, "parity test passes"]);
+
+    let entry = read_entry(&dir, &r#ref);
+    assert_eq!(entry["state"], "open");
+    assert_eq!(entry["status"], "halfway");
+    assert_eq!(entry["labels"], serde_json::json!(["backend"]));
+    assert_eq!(entry["log"][0]["msg"], "started with the JWT approach");
+    assert_eq!(entry["acceptance"][0], "parity test passes");
+    assert_eq!(entry["done"], serde_json::Value::Null);
+
+    let done = ok_in(&dir, &["done", &r#ref]);
+    assert!(done.contains("done"), "{done}");
+    let entry = read_entry(&dir, &r#ref);
+    assert_eq!(entry["state"], "done");
+    assert!(entry["done"].as_str().is_some(), "closing stamps a time");
+
+    // Done entries leave the default view and `ready`.
+    assert!(!ok_in(&dir, &["ls"]).contains("Rewrite the auth layer"));
+    assert!(ok_in(&dir, &["ls", "-a"]).contains("Rewrite the auth layer"));
+    assert!(!ok_in(&dir, &["ready"]).contains(&r#ref));
+
+    // Reopening forgets the completion time.
+    ok_in(&dir, &["state", &r#ref, "open"]);
+    assert_eq!(read_entry(&dir, &r#ref)["done"], serde_json::Value::Null);
+    assert!(ok_in(&dir, &["ready"]).contains(&r#ref));
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
+
+#[test]
+fn the_document_on_disk_is_the_documented_shape() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Rewrite the auth layer");
+    // A fresh entry has no status; the key is omitted rather than written empty.
+    let fresh = std::fs::read_to_string(entry_file(&dir, &r#ref)).unwrap();
+    assert!(!fresh.contains("\"status\""), "{fresh}");
+    ok_in(&dir, &["status", &r#ref, "halfway"]);
+    let raw = std::fs::read_to_string(entry_file(&dir, &r#ref)).unwrap();
+    assert!(raw.ends_with("}\n"), "a file ends with a newline: {raw:?}");
+    // Read the order from the text: a parsed map sorts its keys.
+    let keys: Vec<&str> = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("  \""))
+        .filter_map(|line| line.split('"').next())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "ref",
+            "title",
+            "state",
+            "labels",
+            "created",
+            "updated",
+            "done",
+            "blocked_by",
+            "status",
+            "acceptance",
+            "log"
         ],
-        " ",
+        "key order is part of the format"
+    );
+    assert_eq!(
+        entry_file(&dir, &r#ref)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("{ref}-rewrite-the-auth-layer.json", ref = r#ref)
+    );
+}
+
+#[test]
+fn adding_an_entry_takes_everything_in_one_call() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let other = ok_in(
+        &dir,
+        &[
+            "add",
+            "Beta",
+            "-q",
+            "-l",
+            "backend,api",
+            "--accept",
+            "works,is tested",
+            "--status",
+            "waiting on review",
+            "-b",
+            &r#ref,
+        ],
     )
-    .split_whitespace()
-    .collect::<Vec<_>>()
-    .join(" ")
-}
+    .trim()
+    .to_owned();
+    assert!(r#ref != other);
 
-#[test]
-fn full_task_lifecycle() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let at = || {
-        let mut c = tk();
-        c.arg("-C").arg(dir.path());
-        c
-    };
-
-    let (auth_alias, auth) = add_task(dir.path(), "Implement auth");
-    let (tests_alias, _tests) = add_task(dir.path(), "Write tests");
-    assert_eq!(auth_alias.len(), 4, "aliases are 4 characters");
-    assert_eq!(auth.len(), 26, "IDs are ULIDs");
-
-    at().args(["block", &tests_alias, &auth_alias])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(&auth_alias));
-
-    // Blocked task is not ready.
-    at().arg("ready")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Implement auth"))
-        .stdout(predicates::str::contains("Write tests").not());
-
-    // Completing the blocker unblocks the dependent.
-    at().args(["done", &auth_alias]).assert().success();
-    at().arg("ready")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Write tests"));
-
-    // Detail view renders the blocker as the alias the user typed.
-    let detail = ok_in(dir.path(), &["show", &tests_alias]);
-    assert!(detail.contains("(resolved)"), "{detail}");
-    assert!(
-        detail.contains(&format!("Blockers:    {auth_alias}")),
-        "blockers must render as aliases: {detail}"
-    );
-
-    // Resolution works by alias, by full ID, and by ID prefix. The prefix has
-    // to be long enough to clear the tasks created in the same millisecond.
-    for reference in [auth_alias.clone(), auth.clone(), auth[..16].to_owned()] {
-        ok_in(dir.path(), &["show", &reference]);
-    }
-
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn a_record_is_an_append_only_event_log() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, id) = add_task(dir.path(), "logged");
-
-    ok_in(dir.path(), &["log", &alias, "first note"]);
-    ok_in(dir.path(), &["edit", &alias, "-t", "renamed"]);
-    ok_in(dir.path(), &["done", &alias]);
-
-    let events = read_events(dir.path(), &id);
-    let ops: Vec<&str> = events
-        .iter()
-        .map(|e| e["op"].as_str().unwrap_or_default())
-        .collect();
-    assert_eq!(ops, vec!["created", "log", "title", "status"], "{ops:?}");
-
-    // Every event carries who wrote it and when.
-    for event in &events {
-        assert!(event["writer"].is_string(), "{event}");
-        assert!(event["ts"].is_string(), "{event}");
-    }
-    // The first line is the complete initial state, so a record is
-    // self-describing from the top.
-    assert_eq!(events[0]["data"]["title"], "logged");
-    assert_eq!(events[0]["data"]["alias"], alias);
-
-    // Nothing was overwritten: the original title is still on disk.
-    let raw = std::fs::read_to_string(record_path(dir.path(), &id)).expect("record");
-    assert!(raw.contains("\"title\":\"logged\""), "{raw}");
-    assert_eq!(show_json(dir.path(), &id)["title"], "renamed");
-}
-
-#[test]
-fn ambiguous_and_missing_ids_error() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let out = run_in(dir.path(), &["show", "nope"]);
-    assert!(!out.status.success());
-    let err = flatten(&String::from_utf8_lossy(&out.stderr));
-    assert!(err.contains("task not found"), "{err}");
-}
-
-// --- The store refuses a legacy layout instead of mangling it ---------------
-
-#[test]
-fn a_legacy_store_is_refused_not_mangled() {
-    // The previous layout: config.json plus one JSON document per task.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let tasks = store_dir(dir.path());
-    std::fs::create_dir_all(&tasks).expect("mkdir");
-    std::fs::write(
-        tasks.join("config.json"),
-        r#"{"version":1,"project":"demo","defaults":{"priority":3,"labels":[],"assignees":[]},"clean_after":14}"#,
-    )
-    .expect("config");
-    let legacy = tasks.join("demo-old1.json");
-    std::fs::write(
-        &legacy,
-        r#"{"project":"demo","ref":"old1","title":"Legacy task","status":"open",
-            "priority":3,"created_at":"2026-01-10T12:00:00Z","updated_at":"2026-01-10T12:00:00Z"}"#,
-    )
-    .expect("task");
-
-    for args in [vec!["list"], vec!["check"], vec!["show", "old1"]] {
-        let out = run_in(dir.path(), &args);
-        assert!(!out.status.success(), "tk {args:?} must refuse a v0 store");
-        let err = flatten(&String::from_utf8_lossy(&out.stderr));
-        assert!(err.contains("not a tk v1 store"), "tk {args:?}: {err}");
-        assert!(err.contains("config.json"), "tk {args:?}: {err}");
-        assert!(err.contains("migrate-v0.py"), "tk {args:?}: {err}");
-    }
-
-    // `init` must not paper over it either.
-    let out = run_in(dir.path(), &["init", "-P", "demo"]);
-    assert!(!out.status.success(), "init must refuse a legacy store");
-    assert!(
-        !tasks.join("store.json").exists(),
-        "init wrote a v1 store over a legacy layout"
-    );
-    // And nothing was rewritten.
-    let raw = std::fs::read_to_string(&legacy).expect("legacy task");
-    assert!(raw.contains("Legacy task"), "{raw}");
-}
-
-#[test]
-fn a_bare_directory_is_refused_with_a_clear_reason() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(store_dir(dir.path())).expect("mkdir");
-    let out = run_in(dir.path(), &["list"]);
-    assert!(!out.status.success());
-    let err = flatten(&String::from_utf8_lossy(&out.stderr));
-    assert!(err.contains("store.json is missing"), "{err}");
-}
-
-// --- Regressions: appends must not be lost without a lock -------------------
-
-#[test]
-fn concurrent_log_appends_are_not_lost() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "shared log");
-
-    const WRITERS: usize = 8;
-    let children: Vec<_> = (0..WRITERS)
-        .map(|i| {
-            bin()
-                .arg("-C")
-                .arg(dir.path())
-                .args(["log", &alias, &format!("entry-{i}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn log")
-        })
-        .collect();
-
-    for child in children {
-        let out = child.wait_with_output().expect("wait");
-        assert!(
-            out.status.success(),
-            "a concurrent log writer failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    let task = show_json(dir.path(), &id);
-    let logs = task["logs"].as_array().expect("logs");
+    let entry = read_entry(&dir, &other);
+    assert_eq!(entry["labels"], serde_json::json!(["api", "backend"]));
     assert_eq!(
-        logs.len(),
-        WRITERS,
-        "every successful append must be retained: {logs:?}"
+        entry["acceptance"],
+        serde_json::json!(["works", "is tested"])
     );
-    let mut seen: Vec<String> = logs
-        .iter()
-        .map(|l| l["msg"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    seen.sort();
-    seen.dedup();
-    assert_eq!(seen.len(), WRITERS, "duplicate or missing: {seen:?}");
+    assert_eq!(entry["status"], "waiting on review");
+    assert_eq!(entry["blocked_by"], serde_json::json!([r#ref]));
+    assert!(!ok_in(&dir, &["ready"]).contains(&other), "it is blocked");
 }
 
 #[test]
-fn concurrent_label_deltas_are_not_lost() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "shared labels");
+fn blocking_gates_readiness_and_unblocking_restores_it() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Alpha");
+    let b = add(&dir, "Beta");
+    ok_in(&dir, &["block", &b, &a]);
 
-    const WRITERS: usize = 8;
-    let children: Vec<_> = (0..WRITERS)
-        .map(|i| {
-            bin()
-                .arg("-C")
-                .arg(dir.path())
-                .args(["edit", &alias, "-l", &format!("+label{i}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn edit")
-        })
-        .collect();
-
-    for child in children {
-        let out = child.wait_with_output().expect("wait");
-        assert!(
-            out.status.success(),
-            "a concurrent label edit failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    let task = show_json(dir.path(), &id);
-    let labels: Vec<String> = task["labels"]
-        .as_array()
-        .expect("labels")
-        .iter()
-        .map(|l| l.as_str().unwrap_or_default().to_owned())
-        .collect();
-    for i in 0..WRITERS {
-        assert!(
-            labels.contains(&format!("label{i}")),
-            "label{i} was lost: {labels:?}"
-        );
-    }
-}
-
-#[test]
-fn lock_free_appends_do_not_wait_for_the_store_lock() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (a_alias, _) = add_task(dir.path(), "first");
-    let (b_alias, _) = add_task(dir.path(), "second");
-
-    let ctx = tk::store::Ctx::at_tasks_dir(store_dir(dir.path()));
-    ctx.require().expect("store exists");
-    let guard = ctx.lock_store().expect("take store lock");
-
-    // A log append is last-writer-wins and takes no lock, so it must complete
-    // even while this process holds the lock.
-    let out = bin()
-        .arg("-C")
-        .arg(dir.path())
-        .args(["log", &a_alias, "not blocked"])
-        .output()
-        .expect("spawn log");
-    assert!(
-        out.status.success(),
-        "a lock-free append must not wait for the store lock: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // A graph change validates other records, so it must wait.
-    let mut blocked = bin()
-        .arg("-C")
-        .arg(dir.path())
-        .args(["block", &b_alias, &a_alias])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn block");
-    std::thread::sleep(Duration::from_millis(400));
-    assert!(
-        blocked.try_wait().expect("try_wait").is_none(),
-        "a lock-requiring operation ran while the store lock was held"
-    );
-
-    drop(guard);
-    assert!(blocked.wait().expect("wait").success());
-}
-
-#[test]
-fn concurrent_opposite_blocks_never_create_a_cycle() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (a_alias, _) = add_task(dir.path(), "alpha");
-    let (b_alias, _) = add_task(dir.path(), "beta");
-
-    // Each writer validates the graph under the same lock as its write, so
-    // whichever loses the race must observe the other's edge.
-    let spawn = |id: &str, blocker: &str| {
-        bin()
-            .arg("-C")
-            .arg(dir.path())
-            .args(["block", id, blocker])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn block")
-    };
-    let first = spawn(&b_alias, &a_alias);
-    let second = spawn(&a_alias, &b_alias);
-    let outputs: Vec<_> = [first, second]
-        .into_iter()
-        .map(|c| c.wait_with_output().expect("wait"))
-        .collect();
-
-    let failures: Vec<String> = outputs
-        .iter()
-        .filter(|o| !o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
-        .collect();
-    assert_eq!(failures.len(), 1, "exactly one direction must lose");
-    assert!(
-        failures[0].contains("circular dependency"),
-        "{}",
-        failures[0]
-    );
-
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn check_reports_a_dependency_cycle_on_disk() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (_, a) = add_task(dir.path(), "alpha");
-    let (_, b) = add_task(dir.path(), "beta");
-
-    // A cycle written directly, the way a hand edit or a broken tool would.
-    append_event(dir.path(), &a, "block.add", serde_json::json!([b]));
-    append_event(dir.path(), &b, "block.add", serde_json::json!([a]));
-
-    let out = run_in(dir.path(), &["check"]);
-    assert!(!out.status.success(), "a cycle must fail the check");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("dependency cycle"), "{text}");
-}
-
-// --- Regressions: read side must not destroy state ---------------------------
-
-#[test]
-fn show_does_not_delete_a_missing_blocker_reference() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (blocker_alias, blocker) = add_task(dir.path(), "prerequisite");
-    let (dependent_alias, dependent) = add_task(dir.path(), "dependent");
-    ok_in(dir.path(), &["block", &dependent_alias, &blocker_alias]);
-
-    // The prerequisite disappears (purged, hand-deleted, or synced away).
-    std::fs::remove_file(record_path(dir.path(), &blocker)).expect("remove prerequisite");
-
-    let before = std::fs::read_to_string(record_path(dir.path(), &dependent)).expect("record");
-    let shown = show_json(dir.path(), &dependent);
+    assert!(ok_in(&dir, &["ls"]).contains("[blocked]"));
+    assert_eq!(payload(&dir, &["ready"]).as_array().unwrap().len(), 1);
     assert_eq!(
-        shown["unresolved_blockers"],
-        serde_json::json!([blocker]),
-        "the query must report the unresolved blocker: {shown}"
-    );
-    assert!(shown["blocked_by_incomplete"].as_bool().unwrap_or(false));
-    assert!(
-        shown["issues"].as_array().is_some_and(|i| !i.is_empty()),
-        "show must report the issue: {shown}"
-    );
-
-    let after = std::fs::read_to_string(record_path(dir.path(), &dependent)).expect("record");
-    assert_eq!(before, after, "a read-only query rewrote the record");
-
-    // A missing prerequisite is unresolved, never "ready".
-    let ready = ok_in(dir.path(), &["ready"]);
-    assert!(
-        !ready.contains(&dependent_alias),
-        "dependent must not be ready: {ready}"
-    );
-}
-
-#[test]
-fn check_exits_nonzero_on_findings() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (blocker_alias, blocker) = add_task(dir.path(), "prerequisite");
-    let (dependent_alias, _) = add_task(dir.path(), "dependent");
-    ok_in(dir.path(), &["block", &dependent_alias, &blocker_alias]);
-    std::fs::remove_file(record_path(dir.path(), &blocker)).expect("remove prerequisite");
-
-    let human = run_in(dir.path(), &["check"]);
-    assert!(!human.status.success(), "check must fail on findings");
-    let text = String::from_utf8_lossy(&human.stdout).into_owned();
-    assert!(text.contains("missing task"), "{text}");
-
-    let json = run_in(dir.path(), &["check", "--json"]);
-    assert!(!json.status.success(), "check --json must fail on findings");
-    let report: serde_json::Value =
-        serde_json::from_slice(&json.stdout).expect("check --json payload");
-    // A failing command still answers in the envelope, naming the failure.
-    assert_eq!(report["ok"], serde_json::json!(false));
-    assert_eq!(report["error_code"], "check_failed");
-    assert_eq!(report["command"], "check");
-    assert_eq!(report["data"]["ok"], serde_json::json!(false));
-    assert!(
-        report["data"]["issues"]
-            .as_array()
-            .is_some_and(|i| !i.is_empty()),
-        "{report}"
-    );
-}
-
-// --- Recovery ---------------------------------------------------------------
-
-#[test]
-fn recover_drops_only_the_torn_line() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "interrupted");
-
-    // Simulate a write that was killed before its newline landed.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(record_path(dir.path(), &id))
-        .expect("open record");
-    file.write_all(b"{\"ts\":\"2026-01-11T00:00:00Z\",\"writer\":\"dead-0000\",\"op\":\"log\",")
-        .expect("partial write");
-    drop(file);
-
-    // The task is still readable: the partial line is not applied.
-    let shown = show_json(dir.path(), &id);
-    assert_eq!(shown["title"], "interrupted");
-
-    let report = payload(dir.path(), &["recover", &alias, "--dry-run"]);
-    assert_eq!(report["repaired"].as_array().map(Vec::len), Some(1));
-    assert!(report["bytes_dropped"].as_u64().unwrap_or(0) > 0);
-    assert_eq!(report["dry_run"], serde_json::json!(true));
-    // A dry run must change nothing.
-    let raw = std::fs::read_to_string(record_path(dir.path(), &id)).expect("record");
-    assert!(!raw.ends_with('\n'), "dry run rewrote the record");
-
-    ok_in(dir.path(), &["recover", &alias]);
-    let repaired = std::fs::read_to_string(record_path(dir.path(), &id)).expect("record");
-    assert!(repaired.ends_with('\n'), "recovery must leave a clean tail");
-    assert_eq!(
-        read_events(dir.path(), &id).len(),
-        1,
-        "only created remains"
-    );
-    ok_in(dir.path(), &["check"]);
-}
-
-// --- Deletion, archival, retention ------------------------------------------
-
-#[test]
-fn purge_refuses_while_referenced_and_scrubs_on_request() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (blocker_alias, blocker) = add_task(dir.path(), "prerequisite");
-    let (dependent_alias, dependent) = add_task(dir.path(), "dependent");
-    ok_in(dir.path(), &["block", &dependent_alias, &blocker_alias]);
-
-    let out = run_in(dir.path(), &["purge", &blocker_alias, "-f"]);
-    assert!(
-        !out.status.success(),
-        "purging a referenced task must be refused"
-    );
-    let err = flatten(&String::from_utf8_lossy(&out.stderr));
-    assert!(err.contains("referenced by"), "{err}");
-    assert!(err.contains("--scrub"), "{err}");
-    assert!(record_path(dir.path(), &blocker).exists());
-
-    let report = payload(dir.path(), &["purge", &blocker_alias, "-f", "--scrub"]);
-    assert_eq!(report["references_scrubbed"], serde_json::json!(1));
-    assert!(!record_path(dir.path(), &blocker).exists());
-    assert_eq!(
-        show_json(dir.path(), &dependent)["blocked_by"],
-        serde_json::json!([])
-    );
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn purge_never_deletes_unattended_without_force() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "keep me");
-
-    // stdin is not a terminal here, so the guard must refuse rather than prompt.
-    let out = run_in(dir.path(), &["purge", &alias]);
-    assert!(!out.status.success(), "must not delete without -f");
-    let err = flatten(&String::from_utf8_lossy(&out.stderr));
-    assert!(err.contains("without -f"), "{err}");
-    assert!(record_path(dir.path(), &id).exists());
-
-    ok_in(dir.path(), &["purge", &alias, "-f"]);
-    assert!(!record_path(dir.path(), &id).exists());
-}
-
-#[test]
-fn archive_requires_a_terminal_status_and_hides_from_active_views() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (open_alias, _) = add_task(dir.path(), "still open");
-    let out = run_in(dir.path(), &["archive", &open_alias]);
-    assert!(!out.status.success(), "an open task must not archive");
-
-    let (done_alias, done) = add_task(dir.path(), "finished");
-    ok_in(dir.path(), &["done", &done_alias]);
-    ok_in(dir.path(), &["archive", &done_alias]);
-    assert!(show_json(dir.path(), &done)["archived_at"].is_string());
-
-    // Other tasks may still reference an archived task, and resolution works.
-    let (dependent_alias, _) = add_task(dir.path(), "depends on archived");
-    ok_in(dir.path(), &["block", &dependent_alias, &done_alias]);
-    let ready = ok_in(dir.path(), &["ready"]);
-    assert!(ready.contains(&dependent_alias), "{ready}");
-    ok_in(dir.path(), &["check"]);
-
-    let listed = ok_in(dir.path(), &["list", "-s", "done"]);
-    assert!(
-        !listed.contains(&done_alias),
-        "archived task in the default list: {listed}"
-    );
-    let archived = ok_in(dir.path(), &["list", "--archived"]);
-    assert!(archived.contains(&done_alias), "{archived}");
-    assert!(archived.contains("[archived]"), "{archived}");
-
-    ok_in(dir.path(), &["unarchive", &done_alias]);
-    let listed = ok_in(dir.path(), &["list", "-s", "done"]);
-    assert!(listed.contains(&done_alias), "{listed}");
-}
-
-#[test]
-fn clean_archives_instead_of_deleting() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "old work");
-    ok_in(dir.path(), &["done", &alias]);
-
-    let out = ok_in(dir.path(), &["clean", "--older-than", "0"]);
-    assert!(out.contains("Archived 1"), "{out}");
-    assert!(show_json(dir.path(), &id)["archived_at"].is_string());
-    assert!(
-        record_path(dir.path(), &id).exists(),
-        "clean deleted the record instead of archiving it"
-    );
-
-    let out = ok_in(dir.path(), &["clean", "--older-than", "0", "--purge"]);
-    assert!(out.contains("Purged 1"), "{out}");
-    assert!(!record_path(dir.path(), &id).exists());
-}
-
-#[test]
-fn moving_a_task_keeps_its_identity_and_references() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (blocker_alias, blocker) = add_task(dir.path(), "relocated");
-    let (dependent_alias, _) = add_task(dir.path(), "dependent");
-    ok_in(dir.path(), &["block", &dependent_alias, &blocker_alias]);
-
-    ok_in(dir.path(), &["mv", &blocker_alias, "other"]);
-    let moved = show_json(dir.path(), &blocker);
-    assert_eq!(moved["project"], "other");
-    assert_eq!(moved["alias"], serde_json::json!(blocker_alias));
-    assert_eq!(
-        moved["id"],
-        serde_json::json!(blocker),
-        "identity must not move"
-    );
-
-    // The reference was never rewritten, because it never pointed at a name.
-    ok_in(dir.path(), &["check"]);
-    // And a project rename is equally free of reference churn.
-    ok_in(
-        dir.path(),
-        &["config", "project", "rename", "other", "third"],
-    );
-    ok_in(dir.path(), &["check"]);
-    assert_eq!(show_json(dir.path(), &blocker)["project"], "third");
-}
-
-// --- Stale intent -----------------------------------------------------------
-
-#[test]
-fn edit_rejects_a_stale_revision() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "concurrent intent");
-
-    let rev = show_json(dir.path(), &id)["rev"]
-        .as_str()
-        .expect("rev")
-        .to_owned();
-    ok_in(
-        dir.path(),
-        &["edit", &alias, "-t", "first", "--if-rev", &rev],
-    );
-
-    // The revision is from before the first edit: applying it would silently
-    // overwrite a change this writer never saw.
-    let stale = run_in(
-        dir.path(),
-        &["edit", &alias, "-t", "second", "--if-rev", &rev],
-    );
-    assert!(!stale.status.success(), "stale edit must be rejected");
-    let err = flatten(&String::from_utf8_lossy(&stale.stderr));
-    assert!(err.contains("changed since it was read"), "{err}");
-    assert_eq!(show_json(dir.path(), &id)["title"], "first");
-
-    // The current revision still works, including for a multi-field edit.
-    let fresh = show_json(dir.path(), &id)["rev"]
-        .as_str()
-        .expect("rev")
-        .to_owned();
-    ok_in(
-        dir.path(),
-        &["edit", &alias, "-t", "third", "-p", "1", "--if-rev", &fresh],
-    );
-    let after = show_json(dir.path(), &id);
-    assert_eq!(after["title"], "third");
-    assert_eq!(after["priority"], serde_json::json!(1));
-}
-
-#[test]
-fn a_revision_changes_when_another_writer_appends() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "watched");
-
-    let first = show_json(dir.path(), &id)["rev"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    ok_in(dir.path(), &["log", &alias, "someone else moved it"]);
-    let second = show_json(dir.path(), &id)["rev"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_ne!(first, second, "an append must move the revision");
-
-    // The old token is now stale, and says so.
-    let out = run_in(
-        dir.path(),
-        &["checkpoint", &alias, "too late", "--if-rev", &first],
-    );
-    assert!(!out.status.success());
-    assert_eq!(
-        show_json(dir.path(), &id)["checkpoint"],
-        serde_json::Value::Null
-    );
-}
-
-// --- Store selection --------------------------------------------------------
-
-#[test]
-fn add_never_bootstraps_a_store() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = run_in(dir.path(), &["add", "should not exist"]);
-    assert!(!out.status.success(), "add must not create a store");
-    let err = flatten(&String::from_utf8_lossy(&out.stderr));
-    assert!(err.contains("no .tasks/ directory found"), "{err}");
-    assert!(!store_dir(dir.path()).exists());
-}
-
-#[test]
-fn missing_explicit_store_fails_instead_of_creating() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = dir.path().join("central").join(".tasks");
-
-    let out = bin()
-        .arg("--tasks-dir")
-        .arg(&store)
-        .args(["add", "should not exist"])
-        .output()
-        .expect("spawn tk");
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("task store not found"), "{err}");
-    assert!(!store.exists(), "tk created an explicitly designated store");
-
-    // init is the deliberate exception.
-    let out = bin()
-        .arg("--tasks-dir")
-        .arg(&store)
-        .args(["init", "-P", "central"])
-        .output()
-        .expect("spawn tk");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(store.join("store.json").exists());
-
-    let out = bin()
-        .arg("--tasks-dir")
-        .arg(&store)
-        .args(["add", "now it works"])
-        .output()
-        .expect("spawn tk");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn explicit_missing_store_fails_on_reads_too() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = dir.path().join("absent").join(".tasks");
-    for args in [vec!["list"], vec!["ready"], vec!["config"], vec!["check"]] {
-        let out = bin()
-            .arg("--tasks-dir")
-            .arg(&store)
-            .args(&args)
-            .output()
-            .expect("spawn tk");
-        assert!(
-            !out.status.success(),
-            "tk {args:?} must fail on an explicit missing store"
-        );
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("task store not found"),
-            "tk {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-}
-
-#[test]
-fn linked_worktree_does_not_grow_its_own_store() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    // A linked worktree (or submodule) has `.git` as a file pointing elsewhere.
-    std::fs::write(
-        dir.path().join(".git"),
-        "gitdir: /elsewhere/.git/worktrees/x\n",
-    )
-    .expect("gitdir file");
-
-    let out = run_in(dir.path(), &["add", "shadow store"]);
-    assert!(!out.status.success(), "add must fail without a store");
-    assert!(
-        !store_dir(dir.path()).exists(),
-        "tk created a worktree-local store"
-    );
-
-    // Deliberate creation still works here.
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    assert!(store_dir(dir.path()).exists());
-}
-
-#[test]
-fn path_reports_the_selected_store() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-
-    let discovered = envelope(dir.path(), &["path", "--json"]);
-    let value = &discovered["data"];
-    assert_eq!(discovered["ok"], serde_json::json!(true));
-    assert_eq!(discovered["command"], "path");
-    assert_eq!(value["source"], "discovered");
-    assert_eq!(value["exists"], serde_json::json!(true));
-    assert_eq!(
-        value["tasks_dir"].as_str().expect("tasks_dir"),
-        store_dir(dir.path()).to_string_lossy()
-    );
-
-    let store = store_dir(dir.path());
-    let out = bin()
-        .arg("--tasks-dir")
-        .arg(&store)
-        .args(["path", "--json"])
-        .output()
-        .expect("spawn tk");
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("path --json");
-    assert_eq!(value["data"]["source"], "flag");
-}
-
-// --- Task detail: checkpoint, links, acceptance, evidence --------------------
-
-#[test]
-fn checkpoint_is_replaced_not_appended() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "checkpointed");
-
-    ok_in(dir.path(), &["checkpoint", &alias, "first pass done"]);
-    ok_in(dir.path(), &["log", &alias, "historical note"]);
-    ok_in(
-        dir.path(),
-        &["checkpoint", &alias, "second pass: blocked on review"],
-    );
-
-    let shown = show_json(dir.path(), &id);
-    assert_eq!(shown["checkpoint"], "second pass: blocked on review");
-    assert_eq!(shown["logs"].as_array().expect("logs").len(), 1);
-
-    // Reading it is `show`'s job: the write command requires input.
-    let out = ok_in(dir.path(), &["show", &alias]);
-    assert!(out.contains("second pass: blocked on review"), "{out}");
-    let missing = run_in(dir.path(), &["checkpoint", &alias]);
-    assert!(!missing.status.success(), "a write with no text must fail");
-
-    ok_in(dir.path(), &["checkpoint", &alias, "--clear"]);
-    assert_eq!(
-        show_json(dir.path(), &id)["checkpoint"],
-        serde_json::Value::Null
-    );
-}
-
-#[test]
-fn links_acceptance_and_evidence_round_trip() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "documented");
-    let reference = "agent-context/projects/x/research/y.md";
-
-    ok_in(dir.path(), &["link", &alias, reference]);
-    ok_in(dir.path(), &["accept", &alias, "parity test passes"]);
-    ok_in(dir.path(), &["accept", &alias, "docs updated"]);
-    ok_in(
-        dir.path(),
-        &["evidence", &alias, "cargo test --all-targets"],
-    );
-
-    let shown = show_json(dir.path(), &id);
-    assert_eq!(shown["links"], serde_json::json!([reference]));
-    assert_eq!(
-        shown["acceptance"],
-        serde_json::json!(["parity test passes", "docs updated"])
-    );
-    assert_eq!(
-        shown["evidence"],
-        serde_json::json!(["cargo test --all-targets"])
-    );
-
-    // Adding the same value twice does not duplicate it.
-    ok_in(dir.path(), &["link", &alias, reference]);
-    assert_eq!(
-        show_json(dir.path(), &id)["links"]
+        payload(&dir, &["ls", "--blocked"])
             .as_array()
             .unwrap()
             .len(),
         1
     );
 
-    let detail = ok_in(dir.path(), &["show", &alias]);
-    assert!(detail.contains(reference), "{detail}");
-    assert!(detail.contains("parity test passes"), "{detail}");
+    // Finishing the blocker is enough: readiness follows state, not deletion.
+    ok_in(&dir, &["done", &a]);
+    let ready = payload(&dir, &["ready"]);
+    assert_eq!(ready.as_array().unwrap().len(), 1);
+    assert_eq!(ready[0]["ref"], serde_json::json!(b));
+    assert!(!ok_in(&dir, &["ls"]).contains("[blocked]"));
 
-    ok_in(dir.path(), &["accept", &alias, "--remove", "docs updated"]);
+    // Reopening the blocker blocks it again.
+    ok_in(&dir, &["state", &a, "open"]);
+    assert!(ok_in(&dir, &["ls"]).contains("[blocked]"));
+    ok_in(&dir, &["unblock", &b, &a]);
+    assert!(!ok_in(&dir, &["ls"]).contains("[blocked]"));
+}
+
+#[test]
+fn a_blocking_loop_is_refused_with_the_loop_in_the_message() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Alpha");
+    let b = add(&dir, "Beta");
+    ok_in(&dir, &["block", &b, &a]);
+
+    let out = run_in(&dir, &["block", &a, &b]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("loop"), "{text}");
+    assert!(text.contains("->"), "the loop is spelled out: {text}");
+    // Nothing was written.
+    assert_eq!(read_entry(&dir, &a)["blocked_by"], serde_json::json!([]));
     assert_eq!(
-        show_json(dir.path(), &id)["acceptance"],
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
+
+#[test]
+fn editing_many_fields_happens_in_one_write() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let before = read_entry(&dir, &r#ref);
+
+    ok_in(
+        &dir,
+        &[
+            "edit",
+            &r#ref,
+            "--title",
+            "Alpha, revised",
+            "--status",
+            "blocked on review",
+            "--add-label",
+            "backend",
+            "--add-accept",
+            "parity test passes",
+            "-n",
+            "picked it up",
+        ],
+    );
+    let after = read_entry(&dir, &r#ref);
+    assert_eq!(after["title"], "Alpha, revised");
+    assert_eq!(after["status"], "blocked on review");
+    assert_eq!(after["labels"], serde_json::json!(["backend"]));
+    assert_eq!(
+        after["acceptance"],
         serde_json::json!(["parity test passes"])
     );
-    ok_in(dir.path(), &["unlink", &alias, reference]);
-    assert_eq!(show_json(dir.path(), &id)["links"], serde_json::json!([]));
-    ok_in(dir.path(), &["evidence", &alias, "--clear"]);
+    assert_eq!(after["log"][0]["msg"], "picked it up");
+    assert_eq!(after["created"], before["created"], "created never moves");
+    // The file does not move on a title change: the ref is the identity.
     assert_eq!(
-        show_json(dir.path(), &id)["evidence"],
-        serde_json::json!([])
+        entry_file(&dir, &r#ref)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("{ref}-alpha.json", ref = r#ref)
     );
+    // An explicit slug does move it.
+    ok_in(&dir, &["edit", &r#ref, "--slug", "something-else"]);
+    assert_eq!(
+        entry_file(&dir, &r#ref)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("{ref}-something-else.json", ref = r#ref)
+    );
+    assert_eq!(read_entry(&dir, &r#ref)["created"], before["created"]);
 }
 
 #[test]
-fn labels_replace_and_delta_agree() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (alias, id) = add_task(dir.path(), "labelled");
+fn resolving_by_title_works_and_ambiguity_is_an_error() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Rewrite the auth layer");
+    let b = add(&dir, "Parse the auth header");
 
-    ok_in(dir.path(), &["edit", &alias, "-l", "alpha,beta"]);
     assert_eq!(
-        show_json(dir.path(), &id)["labels"],
-        serde_json::json!(["alpha", "beta"])
+        ok_in(&dir, &["show", "Rewrite"]).trim().lines().next(),
+        Some(format!("{a}  Rewrite the auth layer").as_str())
     );
-    ok_in(dir.path(), &["edit", &alias, "-l", "+gamma"]);
     assert_eq!(
-        show_json(dir.path(), &id)["labels"],
-        serde_json::json!(["alpha", "beta", "gamma"])
+        failure_code(&dir, &["show", "auth"]),
+        "ambiguous",
+        "two matches is an error, not a guess"
     );
-    ok_in(dir.path(), &["edit", &alias, "--remove-label", "beta"]);
     assert_eq!(
-        show_json(dir.path(), &id)["labels"],
-        serde_json::json!(["alpha", "gamma"])
+        failure_code(&dir, &["show", "nothing like it"]),
+        "not_found"
     );
-    // A bare value replaces the whole set.
-    ok_in(dir.path(), &["edit", &alias, "-l", "only"]);
-    assert_eq!(
-        show_json(dir.path(), &id)["labels"],
-        serde_json::json!(["only"])
-    );
-
-    // Filtering still finds it.
-    let found = list_json(dir.path(), &["-l", "only"]);
-    assert_eq!(found.len(), 1);
-}
-
-// --- One envelope for every command -----------------------------------------
-
-/// Every `--json` run answers with the same keys, whatever the command.
-fn assert_envelope_shape(value: &serde_json::Value, command: &str) {
-    let mut keys: Vec<&str> = value
-        .as_object()
-        .unwrap_or_else(|| panic!("not an object: {value}"))
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(
-        keys,
-        vec!["command", "data", "error_code", "issues", "ok", "rev"],
-        "{value}"
-    );
-    assert_eq!(value["command"], command, "{value}");
+    assert!(ok_in(&dir, &["show", &b]).contains("Parse the auth header"));
 }
 
 #[test]
-fn every_command_answers_in_the_same_envelope() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, _id) = add_task(dir.path(), "enveloped");
+fn purge_removes_an_entry_and_unblocks_what_waited_on_it() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Alpha");
+    let b = add(&dir, "Beta");
+    ok_in(&dir, &["block", &b, &a]);
 
-    for (command, args) in [
-        ("add", vec!["add", "another"]),
-        ("list", vec!["list"]),
-        ("ready", vec!["ready"]),
-        ("show", vec!["show", &alias]),
-        ("log", vec!["log", &alias, "note"]),
-        ("checkpoint", vec!["checkpoint", &alias, "mid"]),
-        ("link", vec!["link", &alias, "docs/x.md"]),
-        ("accept", vec!["accept", &alias, "works"]),
-        ("evidence", vec!["evidence", &alias, "cargo test"]),
-        ("check", vec!["check"]),
-        ("path", vec!["path"]),
-        ("config", vec!["config"]),
-    ] {
-        let args = args.iter().map(|a| a.as_ref()).collect::<Vec<&str>>();
-        let value = envelope(dir.path(), &args);
-        assert_envelope_shape(&value, command);
-        assert_eq!(value["ok"], serde_json::json!(true), "tk {args:?}: {value}");
-    }
-
-    // A bad setting is rejected — and the failure is still an envelope.
-    let out = run_in(dir.path(), &["config", "set", "nonsense", "x", "--json"]);
-    assert!(!out.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_envelope_shape(&value, "config");
-    assert_eq!(value["ok"], serde_json::json!(false));
-    assert_eq!(value["error_code"], "invalid_input");
-}
-
-#[test]
-fn json_failures_name_their_kind() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, id) = add_task(dir.path(), "watched");
-
-    // Not found.
-    let out = run_in(dir.path(), &["show", "nope", "--json"]);
-    assert!(!out.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_eq!(value["ok"], serde_json::json!(false));
-    assert_eq!(value["error_code"], "not_found", "{value}");
+    let out = ok_in(&dir, &["purge", &a]);
+    assert!(out.contains(&a), "{out}");
+    assert!(out.contains(&b), "it reports what it unblocked: {out}");
     assert!(
-        value["issues"][0]
-            .as_str()
-            .is_some_and(|m| m.contains("task not found")),
-        "the envelope carries the message too: {value}"
+        read_entry(&dir, &b)["blocked_by"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
+    assert_eq!(payload(&dir, &["ls"]).as_array().unwrap().len(), 1);
+    assert_eq!(failure_code(&dir, &["show", &a]), "not_found");
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
 
-    // A stale revision is its own kind, so a caller can retry rather than
-    // conclude the task does not exist.
-    let rev = show_json(dir.path(), &id)["rev"]
+#[test]
+fn a_purge_dry_run_changes_nothing() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let out = ok_in(&dir, &["purge", &r#ref, "--dry-run"]);
+    assert!(out.contains("would delete"), "{out}");
+    assert!(read_entry(&dir, &r#ref)["title"].as_str().is_some());
+}
+
+// --- Format gate -----------------------------------------------------------
+
+#[test]
+fn an_older_store_is_refused_with_the_reason_and_the_remedy() {
+    let (_tmp, dir) = store();
+    // A legacy store is one without our own store file; drop it and the entries.
+    std::fs::remove_file(dir.join(".tasks/.tk.json")).unwrap();
+
+    // A v1 layout: store.json plus records/.
+    std::fs::create_dir_all(dir.join(".tasks/records")).unwrap();
+    std::fs::write(dir.join(".tasks/store.json"), r#"{"format":2}"#).unwrap();
+    let out = run_in(&dir, &["ls"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("v1"), "{text}");
+    assert!(text.contains("migrate_to_v3.py"), "{text}");
+    assert_eq!(failure_code(&dir, &["ls"]), "not_a_store");
+
+    // A v0 layout: config.json.
+    std::fs::remove_file(dir.join(".tasks/store.json")).unwrap();
+    std::fs::remove_dir_all(dir.join(".tasks/records")).unwrap();
+    std::fs::write(dir.join(".tasks/config.json"), "{}").unwrap();
+    let out = run_in(&dir, &["ls"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("v0"), "{}", stderr(&out));
+
+    // A format number this binary does not write.
+    std::fs::remove_file(dir.join(".tasks/config.json")).unwrap();
+    std::fs::write(dir.join(".tasks/.tk.json"), r#"{"format":9}"#).unwrap();
+    assert!(stderr(&run_in(&dir, &["ls"])).contains("format 9"));
+}
+
+#[test]
+fn a_store_selected_explicitly_must_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nowhere/.tasks");
+    let out = Command::new(env!("CARGO_BIN_EXE_tk"))
+        .args(["--tasks-dir", &missing.display().to_string(), "ls"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("will not create"), "{text}");
+}
+
+// --- Error codes and revisions --------------------------------------------
+
+#[test]
+fn error_codes_are_stable_and_machine_readable() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+
+    // A stale revision: the only defense against a whole-file clobber.
+    let rev = payload(&dir, &["show", &r#ref])["rev"]
         .as_str()
         .unwrap()
         .to_owned();
-    ok_in(dir.path(), &["log", &alias, "moved on"]);
-    let out = run_in(
-        dir.path(),
-        &["checkpoint", &alias, "late", "--if-rev", &rev, "--json"],
+    ok_in(&dir, &["status", &r#ref, "something changed"]);
+    assert_eq!(
+        failure_code(&dir, &["status", &r#ref, "again", "--if-rev", &rev]),
+        "stale_revision"
     );
-    assert!(!out.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_eq!(value["error_code"], "stale_revision", "{value}");
+    // The current revision is accepted.
+    let rev = payload(&dir, &["show", &r#ref])["rev"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok_in(&dir, &["status", &r#ref, "and again", "--if-rev", &rev]);
+
+    assert_eq!(failure_code(&dir, &["show", "nope"]), "not_found");
+    // An ordinary failure has no payload, and still keeps every key.
+    let out = run_in(&dir, &["-j", "show", "nope"]);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["data"], serde_json::Value::Null);
+    assert_eq!(envelope["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(failure_code(&dir, &["edit", &r#ref]), "invalid_input");
+    assert_eq!(
+        failure_code(&dir, &["state", &r#ref, "silly"]),
+        "invalid_input"
+    );
 }
 
 #[test]
-fn a_legacy_store_failure_says_which_kind_it_is() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(store_dir(dir.path())).expect("mkdir");
-    std::fs::write(
-        store_dir(dir.path()).join("config.json"),
-        r#"{"version":1,"project":"demo"}"#,
-    )
-    .expect("config");
+fn check_reports_findings_and_exits_nonzero() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Alpha");
+    let b = add(&dir, "Beta");
 
-    let out = run_in(dir.path(), &["list", "--json"]);
+    // Break the store by hand: a dangling blocker, a self-block, a stray file.
+    let mut entry = read_entry(&dir, &a);
+    entry["blocked_by"] = serde_json::json!(["zzzz", a]);
+    std::fs::write(
+        entry_file(&dir, &a),
+        serde_json::to_string_pretty(&entry).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join(".tasks/stray.json"), "{}").unwrap();
+    let _ = b;
+
+    let out = run_in(&dir, &["check"]);
     assert!(!out.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_eq!(value["error_code"], "not_a_v1_store", "{value}");
+    let text = stderr(&out);
+    for expected in ["zzzz", "blocks itself", "stray.json"] {
+        assert!(text.contains(expected), "{expected} missing from:\n{text}");
+    }
+    // The same findings travel in the failure's envelope.
+    assert_eq!(failure_code(&dir, &["check"]), "check_failed");
+    let envelope: serde_json::Value = {
+        let out = run_in(&dir, &["-j", "check"]);
+        serde_json::from_str(&stdout(&out)).unwrap()
+    };
+    let findings = envelope["data"]["findings"].as_array().unwrap();
     assert!(
-        value["issues"][0]
-            .as_str()
-            .is_some_and(|m| m.contains("migrate-v0.py")),
-        "{value}"
+        findings
+            .iter()
+            .any(|f| f.as_str().unwrap_or_default().contains("zzzz")),
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["clean"], serde_json::json!(false));
+}
+
+#[test]
+fn a_human_reader_gets_sentences_and_a_machine_gets_a_code() {
+    let (_tmp, dir) = store();
+    let out = run_in(&dir, &["show", "nope"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(text.contains("no entry matches"), "{text}");
+    // The machine kind does not lead the human message.
+    assert!(!text.contains("not_found"), "{text}");
+}
+
+// --- Keys tk does not know ------------------------------------------------
+
+#[test]
+fn a_hand_added_field_survives_a_tk_write() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Alpha");
+    let path = entry_file(&dir, &r#ref);
+    let mut entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    entry["assignee"] = serde_json::json!("nick");
+    std::fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+
+    ok_in(&dir, &["status", &r#ref, "picked up"]);
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(after["assignee"], serde_json::json!("nick"));
+    assert_eq!(after["status"], "picked up");
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
     );
 }
 
-// --- Batch application ------------------------------------------------------
+// --- Batches --------------------------------------------------------------
 
-/// Run `tk apply` with a request body on stdin.
-fn apply_in(dir: &Path, body: &str, extra: &[&str]) -> std::process::Output {
-    let mut child = bin()
+fn apply(dir: &Path, batch: &str) -> Output {
+    apply_with(dir, &["apply", "-j"], batch)
+}
+
+fn apply_with(dir: &Path, args: &[&str], batch: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tk"))
         .arg("-C")
         .arg(dir)
-        .arg("apply")
-        .args(extra)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn apply");
+        .expect("spawn tk apply");
     child
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(body.as_bytes())
+        .write_all(batch.as_bytes())
         .expect("write batch");
-    child.wait_with_output().expect("wait")
+    child.wait_with_output().expect("apply output")
 }
 
-fn apply_ok(dir: &Path, body: &str) -> serde_json::Value {
-    let out = apply_in(dir, body, &["--json"]);
-    assert!(
-        out.status.success(),
-        "apply failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+#[test]
+fn a_batch_applies_in_order_and_reports_what_it_did() {
+    let (_tmp, dir) = store();
+    let out = apply(
+        &dir,
+        r#"{"intents": [
+            {"op": "add", "title": "Alpha", "labels": ["backend"]},
+            {"op": "add", "title": "Beta"},
+            {"op": "block", "ref": "beta", "blocker": "alpha"},
+            {"op": "note", "ref": "beta", "message": "waiting"},
+            {"op": "state", "ref": "alpha", "state": "done"}
+        ]}"#,
     );
-    serde_json::from_slice(&out.stdout).expect("apply envelope")
-}
+    assert!(out.status.success(), "{}", stderr(&out));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["data"]["applied"].as_array().unwrap().len(), 5);
+    assert_eq!(envelope["data"]["failed"], serde_json::Value::Null);
+    assert_eq!(envelope["data"]["dry_run"], serde_json::json!(false));
+    let note = envelope["data"]["note"].as_str().unwrap();
+    assert!(note.contains("not a transaction"), "{note}");
 
-#[test]
-fn apply_runs_a_whole_change_in_one_call() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (a_alias, a_id) = add_task(dir.path(), "alpha");
-    let (b_alias, b_id) = add_task(dir.path(), "beta");
-
-    let body = serde_json::json!({"intents": [
-        {"op": "add", "title": "gamma", "labels": ["batched"]},
-        {"op": "block", "id": a_alias, "blocker": b_alias},
-        {"op": "checkpoint", "id": a_alias, "text": "in flight"},
-        {"op": "log", "id": a_alias, "msg": "batched note"},
-        {"op": "status", "id": a_alias, "status": "active"},
-    ]})
-    .to_string();
-
-    let value = apply_ok(dir.path(), &body);
-    assert_eq!(value["command"], "apply");
-    assert_eq!(value["data"]["dry_run"], serde_json::json!(false));
-    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 5);
-
-    // Every intent landed, and five invocations became one.
-    let a = show_json(dir.path(), &a_id);
-    assert_eq!(a["status"], "active");
-    assert_eq!(a["checkpoint"], "in flight");
-    assert_eq!(a["blocked_by"], serde_json::json!([b_id]));
-    assert_eq!(a["logs"][0]["msg"], "batched note");
-    assert_eq!(list_json(dir.path(), &[]).len(), 3);
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn apply_validates_the_whole_batch_before_writing() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    add_task(dir.path(), "existing");
-
-    // The second intent cannot resolve, so the first must not be written.
-    let body = serde_json::json!({"intents": [
-        {"op": "add", "title": "should not exist"},
-        {"op": "log", "id": "zzzz", "msg": "nowhere"},
-    ]})
-    .to_string();
-    let out = apply_in(dir.path(), &body, &[]);
-    assert!(!out.status.success(), "a bad batch must be rejected");
-
-    let tasks = list_json(dir.path(), &[]);
-    assert_eq!(tasks.len(), 1, "nothing may be written: {tasks:?}");
-}
-
-#[test]
-fn apply_rejects_a_cycle_whole() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (a_alias, a_id) = add_task(dir.path(), "alpha");
-    let (b_alias, b_id) = add_task(dir.path(), "beta");
-
-    let body = serde_json::json!({"intents": [
-        {"op": "block", "id": a_alias, "blocker": b_alias},
-        {"op": "block", "id": b_alias, "blocker": a_alias},
-    ]})
-    .to_string();
-    let out = apply_in(dir.path(), &body, &[]);
-    assert!(!out.status.success(), "a cyclic batch must be rejected");
-
-    // Neither edge was written: a rejected batch leaves no half-graph.
+    // The batch really did the work.
+    assert_eq!(payload(&dir, &["ready"]).as_array().unwrap().len(), 1);
     assert_eq!(
-        show_json(dir.path(), &a_id)["blocked_by"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        show_json(dir.path(), &b_id)["blocked_by"],
-        serde_json::json!([])
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
     );
 }
 
 #[test]
-fn apply_dry_run_reports_without_writing() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, id) = add_task(dir.path(), "untouched");
+fn a_batch_and_the_commands_agree() {
+    // Commands and batch intents call the same operations; this is the test that
+    // caught them disagreeing in v1.
+    let (_tmp, batch_dir) = store();
+    let (_tmp2, cmd_dir) = store();
 
-    let body = serde_json::json!({"intents": [
-        {"op": "add", "title": "planned"},
-        {"op": "log", "id": alias, "msg": "planned note"},
-    ]})
-    .to_string();
-    let out = apply_in(dir.path(), &body, &["--json", "--dry-run"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_eq!(value["data"]["dry_run"], serde_json::json!(true), "{value}");
-    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 2);
+    let batch = r#"{"intents": [
+        {"op": "add", "title": "Rewrite the auth layer"},
+        {"op": "add", "title": "Write the parser"},
+        {"op": "edit", "ref": "auth", "title": "Rewrite the auth layer, properly",
+         "status": "halfway", "add_labels": ["backend"],
+         "add_acceptance": ["parity test passes"], "note": "started"},
+        {"op": "block", "ref": "parser", "blocker": "auth"},
+        {"op": "state", "ref": "parser", "state": "dropped"}
+    ]}"#;
+    let out = apply(&batch_dir, batch);
+    assert!(out.status.success(), "{}", stderr(&out));
 
-    assert_eq!(
-        list_json(dir.path(), &[]).len(),
-        1,
-        "a dry run wrote a task"
-    );
-    assert_eq!(show_json(dir.path(), &id)["logs"], serde_json::json!([]));
-}
-
-#[test]
-fn apply_rejects_a_misspelled_intent_field() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, id) = add_task(dir.path(), "typo target");
-
-    // `message` is not `msg`: silently doing nothing would hide the mistake.
-    let body = serde_json::json!({"intents": [
-        {"op": "log", "id": alias, "message": "typo"},
-    ]})
-    .to_string();
-    let out = apply_in(dir.path(), &body, &[]);
-    assert!(!out.status.success(), "a misspelled field must fail");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("message"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(show_json(dir.path(), &id)["logs"], serde_json::json!([]));
-}
-
-#[test]
-fn apply_honours_a_stale_revision() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-    let (alias, id) = add_task(dir.path(), "contended");
-    let rev = show_json(dir.path(), &id)["rev"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
-    // Someone else moves the record first.
-    ok_in(dir.path(), &["log", &alias, "another writer"]);
-
-    let body = serde_json::json!({"intents": [
-        {"op": "checkpoint", "id": alias, "text": "late", "if_rev": rev},
-    ]})
-    .to_string();
-    let out = apply_in(dir.path(), &body, &[]);
-    assert!(!out.status.success(), "a stale intent must be rejected");
-    assert_eq!(
-        show_json(dir.path(), &id)["checkpoint"],
-        serde_json::Value::Null
-    );
-}
-
-// --- The CLI and apply must agree -------------------------------------------
-
-/// The same change, made two ways, must produce the same task.
-///
-/// `tk apply` used to be a second implementation of every command; this is the
-/// test that would have caught the divergence (it caught one during the
-/// rewrite), so it stays.
-#[test]
-fn cli_and_apply_produce_the_same_task() {
-    let via_cli = tempfile::tempdir().expect("tempdir");
-    let via_batch = tempfile::tempdir().expect("tempdir");
-    init_project(&via_cli, "demo");
-    init_project(&via_batch, "demo");
-
-    let (a1, id1) = add_task(via_cli.path(), "alpha");
-    let (b1, _) = add_task(via_cli.path(), "beta");
-    let (a2, id2) = add_task(via_batch.path(), "alpha");
-    let (b2, _) = add_task(via_batch.path(), "beta");
-
-    // One way: a sequence of commands.
+    let auth = add(&cmd_dir, "Rewrite the auth layer");
+    let parser = add(&cmd_dir, "Write the parser");
     ok_in(
-        via_cli.path(),
+        &cmd_dir,
         &[
             "edit",
-            &a1,
-            "-t",
-            "renamed",
-            "-l",
-            "+x,+y",
-            "-p",
-            "1",
-            "-d",
-            "a description",
-            "--parent",
-            &b1,
+            &auth,
+            "--title",
+            "Rewrite the auth layer, properly",
+            "--status",
+            "halfway",
+            "--add-label",
+            "backend",
+            "--add-accept",
+            "parity test passes",
+            "-n",
+            "started",
         ],
     );
-    ok_in(via_cli.path(), &["checkpoint", &a1, "halfway"]);
-    ok_in(via_cli.path(), &["accept", &a1, "acc-one", "acc-two"]);
-    ok_in(via_cli.path(), &["evidence", &a1, "cargo test"]);
-    ok_in(via_cli.path(), &["link", &a1, "docs/x.md"]);
-    ok_in(via_cli.path(), &["log", &a1, "a note"]);
-    ok_in(via_cli.path(), &["block", &a1, &b1]);
-    ok_in(via_cli.path(), &["start", &a1]);
+    ok_in(&cmd_dir, &["block", &parser, &auth]);
+    ok_in(&cmd_dir, &["state", &parser, "dropped"]);
 
-    // The other: one batch of intents, same order.
-    let body = serde_json::json!({"intents": [
-        {"op": "edit", "id": a2, "title": "renamed", "priority": 1, "labels": ["+x", "+y"],
-         "desc": "a description", "parent": b2},
-        {"op": "checkpoint", "id": a2, "text": "halfway"},
-        {"op": "accept", "id": a2, "values": ["acc-one", "acc-two"]},
-        {"op": "evidence", "id": a2, "values": ["cargo test"]},
-        {"op": "link", "id": a2, "values": ["docs/x.md"]},
-        {"op": "log", "id": a2, "msg": "a note"},
-        {"op": "block", "id": a2, "blocker": b2},
-        {"op": "status", "id": a2, "status": "active"},
-    ]})
-    .to_string();
-    let value = apply_ok(via_batch.path(), &body);
-    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 8);
-
-    let one = show_json(via_cli.path(), &id1);
-    let two = show_json(via_batch.path(), &id2);
-
-    for field in [
-        "title",
-        "priority",
-        "status",
-        "labels",
-        "checkpoint",
-        "acceptance",
-        "evidence",
-        "links",
-        "description",
-    ] {
-        assert_eq!(one[field], two[field], "field {field} diverged");
-    }
-    // The parent is a reference, so each store renders its own handle for beta.
-    assert_eq!(one["parent_ref"], serde_json::json!(b1));
-    assert_eq!(two["parent_ref"], serde_json::json!(b2));
-    // Identity differs between the two stores (independent ULIDs and aliases),
-    // so the graph is compared through each store's own handle for beta.
-    assert_eq!(one["blocked_by"].as_array().map(Vec::len), Some(1));
-    assert_eq!(one["blocker_refs"], serde_json::json!([b1]));
-    assert_eq!(two["blocker_refs"], serde_json::json!([b2]));
-    let messages = |v: &serde_json::Value| -> Vec<String> {
-        v["logs"]
+    let documents = |dir: &Path| -> Vec<serde_json::Value> {
+        let mut out: Vec<serde_json::Value> = payload(dir, &["ls", "-a"])
             .as_array()
             .unwrap()
             .iter()
-            .map(|l| l["msg"].as_str().unwrap().to_owned())
-            .collect()
+            .map(|view| {
+                let mut doc = view.clone();
+                doc["ref"] = serde_json::json!("");
+                doc["blocked_by"] = serde_json::json!([]);
+                doc["rev"] = serde_json::json!("");
+                doc["file"] = serde_json::json!("");
+                // Wall-clock stamps differ between the two stores.
+                doc["created"] = serde_json::json!("");
+                doc["updated"] = serde_json::json!("");
+                doc["done"] = serde_json::json!(doc["done"].is_string());
+                if let Some(log) = doc["log"].as_array_mut() {
+                    for line in log {
+                        line["ts"] = serde_json::json!("");
+                    }
+                }
+                doc.as_object_mut().unwrap().remove("blocking");
+                doc.as_object_mut().unwrap().remove("unresolved_blockers");
+                doc
+            })
+            .collect();
+        out.sort_by(|a, b| a["title"].as_str().cmp(&b["title"].as_str()));
+        out
     };
-    assert_eq!(messages(&one), messages(&two));
-    assert_eq!(messages(&one), vec!["a note"]);
-
-    // And the batch path leaves a store the checker is happy with.
-    ok_in(via_batch.path(), &["check"]);
-    ok_in(via_cli.path(), &["check"]);
+    assert_eq!(documents(&batch_dir), documents(&cmd_dir));
 }
 
-// --- Configuration -----------------------------------------------------------
+#[test]
+fn a_batch_stops_at_the_first_failure_and_says_so() {
+    let (_tmp, dir) = store();
+    let out = apply(
+        &dir,
+        r#"{"intents": [
+            {"op": "add", "title": "Alpha"},
+            {"op": "note", "ref": "nope", "message": "x"},
+            {"op": "add", "title": "Beta"}
+        ]}"#,
+    );
+    assert!(!out.status.success());
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["data"]["applied"].as_array().unwrap().len(), 1);
+    assert_eq!(envelope["data"]["failed"]["index"], serde_json::json!(1));
+    assert_eq!(envelope["data"]["not_attempted"], serde_json::json!(1));
+    assert_eq!(envelope["error_code"], "not_found");
+    // What ran, stayed: no rollback, and only one entry exists.
+    assert_eq!(payload(&dir, &["ls"]).as_array().unwrap().len(), 1);
+}
 
 #[test]
-fn config_set_changes_one_setting() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    init_project(&dir, "demo");
-
-    let setting = |key: &str, value: &str| -> serde_json::Value {
-        payload(dir.path(), &["config", "set", key, value])
-    };
-
-    assert_eq!(setting("project", "other")["project"], "other");
-    assert_eq!(setting("priority", "1")["priority"], serde_json::json!(1));
-    assert_eq!(
-        setting("priority", "high")["priority"],
-        serde_json::json!(2)
+fn a_dry_run_batch_writes_nothing() {
+    let (_tmp, dir) = store();
+    let out = apply_with(
+        &dir,
+        &["apply", "-j", "--dry-run"],
+        r#"{"intents": [{"op": "add", "title": "Alpha"}, {"op": "add", "title": "Beta"}]}"#,
     );
-    assert_eq!(
-        setting("labels", "a,b")["labels"],
-        serde_json::json!(["a", "b"])
-    );
-    assert_eq!(setting("labels", "")["labels"], serde_json::json!([]));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let envelope: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(envelope["data"]["dry_run"], serde_json::json!(true));
+    assert_eq!(envelope["data"]["applied"].as_array().unwrap().len(), 2);
+    assert!(payload(&dir, &["ls"]).as_array().unwrap().is_empty());
+}
 
-    let off = setting("clean-after", "off");
-    assert_eq!(off["clean_after"]["enabled"], serde_json::json!(false));
-    let days = setting("clean-after", "30");
-    assert_eq!(days["clean_after"]["enabled"], serde_json::json!(true));
-    assert_eq!(days["clean_after"]["days"], serde_json::json!(30));
-
-    // The settings are one command's worth of surface, so the whole file is
-    // readable in one place and carries the defaults a new task inherits.
-    let config = payload(dir.path(), &["config"]);
-    assert_eq!(config["project"], "other");
-    assert_eq!(config["defaults"]["priority"], serde_json::json!(2));
-    let (new_alias, new_id) = add_task(dir.path(), "inherits defaults");
-    assert_eq!(new_alias.len(), 4);
-    assert_eq!(show_json(dir.path(), &new_id)["project"], "other");
-    assert_eq!(
-        show_json(dir.path(), &new_id)["priority"],
-        serde_json::json!(2)
-    );
-
-    // Unknown keys and bad values are rejected with a code, not ignored.
-    for (key, value) in [
-        ("nonsense", "x"),
-        ("priority", "9"),
-        ("clean-after", "later"),
+#[test]
+fn a_malformed_batch_is_refused_before_anything_is_written() {
+    let (_tmp, dir) = store();
+    for bad in [
+        "",
+        "{not json",
+        r#"{"intents": [{"op": "nope"}]}"#,
+        r#"[{"op": "note", "ref": "a7b3"}]"#,
     ] {
-        let out = run_in(dir.path(), &["config", "set", key, value, "--json"]);
-        assert!(!out.status.success(), "config set {key} {value} must fail");
-        let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-        assert_eq!(value["error_code"], "invalid_input", "{value}");
+        let out = apply(&dir, bad);
+        assert!(!out.status.success(), "{bad:?} should fail");
+        assert!(payload(&dir, &["ls"]).as_array().unwrap().is_empty());
     }
 }
 
-// --- Lock guard for external sync -------------------------------------------
+// --- Concurrency ----------------------------------------------------------
 
-#[cfg(unix)]
+/// A lock held by another process makes a writer wait, because a mutation is a
+/// read-modify-write of a whole document.
 #[test]
-fn lock_runs_a_command_and_propagates_its_status() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-
-    let marker = dir.path().join("marker");
-    let out = bin()
+fn a_held_lock_makes_a_writer_wait_but_not_a_reader() {
+    let (_tmp, dir) = store();
+    let holder = Command::new(env!("CARGO_BIN_EXE_tk"))
         .arg("-C")
-        .arg(dir.path())
-        .args([
-            "lock",
-            "--",
-            "sh",
-            "-c",
-            &format!("touch {}", marker.display()),
-        ])
-        .output()
-        .expect("spawn tk lock");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(marker.exists(), "child command did not run");
-
-    let out = bin()
-        .arg("-C")
-        .arg(dir.path())
-        .args(["lock", "--", "sh", "-c", "exit 7"])
-        .output()
-        .expect("spawn tk lock");
-    assert_eq!(out.status.code(), Some(7), "child status must propagate");
-}
-
-#[cfg(unix)]
-#[test]
-fn lock_scan_guards_every_store_under_a_root() {
-    let root = tempfile::tempdir().expect("tempdir");
-    for name in ["a", "b"] {
-        let project = root.path().join(name);
-        std::fs::create_dir_all(&project).expect("mkdir");
-        ok_in(&project, &["init", "-P", name]);
-    }
-
-    let ctx = tk::store::Ctx::at_tasks_dir(root.path().join("a").join(".tasks"));
-    let guard = ctx.lock_store().expect("lock first store");
-
-    let mut child = bin()
-        .args(["lock", "--scan"])
-        .arg(root.path())
-        .args(["--", "sh", "-c", "exit 0"])
+        .arg(&dir)
+        .args(["lock", "--", "sleep", "1"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn tk lock --scan");
-    std::thread::sleep(Duration::from_millis(400));
+        .expect("spawn lock holder");
+    // Give the holder time to acquire the lock.
+    std::thread::sleep(Duration::from_millis(250));
+
+    // A read does not take the lock, so it is fast.
+    let started = Instant::now();
+    assert!(ok_in(&dir, &["ls"]).contains("no entries"));
     assert!(
-        child.try_wait().expect("try_wait").is_none(),
-        "scan lock ignored a store that was already locked"
+        started.elapsed() < Duration::from_millis(500),
+        "reads do not wait for the lock (took {:?})",
+        started.elapsed()
     );
-    drop(guard);
-    assert!(child.wait().expect("wait").success());
+
+    // A write waits for it, and then succeeds.
+    let started = Instant::now();
+    let r#ref = add(&dir, "Waited for the lock");
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(400),
+        "the write waited ({waited:?})"
+    );
+    assert_eq!(read_entry(&dir, &r#ref)["title"], "Waited for the lock");
+
+    holder.wait_with_output().expect("holder exits");
+}
+
+/// Eight processes appending to one entry: with whole-file writes and a lock,
+/// every append must survive. Without the lock this loses updates.
+#[test]
+fn concurrent_log_appends_are_not_lost() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Contended");
+
+    let children: Vec<_> = (0..8)
+        .map(|n| {
+            let dir = dir.clone();
+            let r#ref = r#ref.clone();
+            std::thread::spawn(move || run_in(&dir, &["note", &r#ref, &format!("writer {n}")]))
+        })
+        .collect();
+    for child in children {
+        let out = child.join().expect("thread");
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let entry = read_entry(&dir, &r#ref);
+    let logs = entry["log"].as_array().expect("a log");
+    assert_eq!(logs.len(), 8, "every append survived: {logs:?}");
+    let mut messages: Vec<&str> = logs.iter().filter_map(|l| l["msg"].as_str()).collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        (0..8).map(|n| format!("writer {n}")).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
+
+/// Concurrent opposite blocks: one must win, and the store must not end up in a
+/// loop. Whichever order the lock grants, the loser is refused.
+#[test]
+fn concurrent_opposite_blocks_never_create_a_loop() {
+    let (_tmp, dir) = store();
+    let a = add(&dir, "Alpha");
+    let b = add(&dir, "Beta");
+
+    let spawn = |from: String, blocker: String| {
+        let dir = dir.clone();
+        std::thread::spawn(move || run_in(&dir, &["block", &from, &blocker]))
+    };
+    let first = spawn(b.clone(), a.clone());
+    let second = spawn(a.clone(), b.clone());
+    let results = [first.join().unwrap(), second.join().unwrap()];
+
+    assert_eq!(
+        results.iter().filter(|out| out.status.success()).count(),
+        1,
+        "exactly one of the two directions is accepted"
+    );
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
+
+/// Concurrent label deltas: `+x` and `-y` are read-modify-write, so the lock is
+/// what keeps them all. A bare label *replaces* a set that was read earlier, so
+/// it can legitimately drop a concurrent delta — that boundary is documented,
+/// and this test pins the safe form.
+#[test]
+fn concurrent_label_deltas_are_not_lost() {
+    let (_tmp, dir) = store();
+    let r#ref = add(&dir, "Contended");
+    ok_in(&dir, &["label", &r#ref, "base"]);
+
+    let children: Vec<_> = (0..8)
+        .map(|n| {
+            let dir = dir.clone();
+            let r#ref = r#ref.clone();
+            std::thread::spawn(move || run_in(&dir, &["label", &r#ref, &format!("+tag{n}")]))
+        })
+        .collect();
+    for child in children {
+        let out = child.join().expect("thread");
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+
+    let entry = read_entry(&dir, &r#ref);
+    let labels = entry["labels"].as_array().expect("labels");
+    assert_eq!(labels.len(), 9, "base plus eight deltas: {labels:?}");
+    for n in 0..8 {
+        assert!(
+            labels.contains(&serde_json::json!(format!("tag{n}"))),
+            "{labels:?}"
+        );
+    }
+}
+
+/// Eight processes creating entries at once: every ref is unique, and every
+/// entry survives.
+#[test]
+fn concurrent_creates_allocate_unique_refs() {
+    let (_tmp, dir) = store();
+    let children: Vec<_> = (0..8)
+        .map(|n| {
+            let dir = dir.clone();
+            std::thread::spawn(move || ok_in(&dir, &["add", &format!("Entry {n}"), "-q"]))
+        })
+        .collect();
+    let refs: Vec<String> = children
+        .into_iter()
+        .map(|child| child.join().expect("thread").trim().to_owned())
+        .collect();
+
+    let mut unique = refs.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 8, "refs are unique: {refs:?}");
+    assert_eq!(payload(&dir, &["ls"]).as_array().unwrap().len(), 8);
+    assert_eq!(
+        ok_in(&dir, &["check"]).trim(),
+        "ok: the store is consistent"
+    );
+}
+
+// --- Config ---------------------------------------------------------------
+
+#[test]
+fn config_shows_the_store_and_remembers_directory_aliases() {
+    let (_tmp, dir) = store();
+    add(&dir, "Alpha");
+    let text = ok_in(&dir, &["config"]);
+    assert!(text.contains("Format:  3"), "{text}");
+    assert!(text.contains("Entries: 1"), "{text}");
+
+    ok_in(&dir, &["config", "alias", "work", "/tmp"]);
+    let text = ok_in(&dir, &["config"]);
+    assert!(text.contains("work"), "{text}");
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".tasks/.tk.json")).unwrap())
+            .unwrap();
+    assert_eq!(raw["format"], serde_json::json!(3));
+    assert_eq!(raw["aliases"]["work"], serde_json::json!("/tmp"));
+
+    ok_in(&dir, &["config", "alias", "work"]);
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".tasks/.tk.json")).unwrap())
+            .unwrap();
+    assert!(
+        raw.get("aliases").is_none(),
+        "removing the last alias drops the map: {raw}"
+    );
 }

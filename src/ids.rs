@@ -1,226 +1,153 @@
-//! Task identity: ULIDs, short aliases, and reference resolution.
+//! Entry identity: the ref.
 //!
-//! A task ID is a 26-character ULID: Crockford base32, lowercased, sortable by
-//! creation time. Identity never changes — `project` is a mutable display field
-//! and the 4-character alias is the handle people type. Resolution order is
-//! exact alias → exact ID → unique ID prefix.
+//! A ref is four characters from the Crockford base32 alphabet, assigned once
+//! and never reused. An entry's file is `<ref>-<slug>.json`: the ref is identity,
+//! the slug is a creation-time mnemonic. Renaming a title therefore breaks no
+//! reference, and nothing anywhere records a path.
 //!
-//! Both namespaces draw from the same alphabet, so an input of exactly
-//! [`ALIAS_LEN`] characters that matches an alias resolves as that alias; type
-//! more of the ULID to reach a record whose ID happens to start the same way.
+//! Crockford base32 drops `i`, `l`, `o`, and `u`, which is why a ref is safe to
+//! type, read aloud, or copy out of a filename: the letters that are mistaken for
+//! `1` and `0` are simply not in the alphabet. Refs are lowercase on disk and
+//! matched case-insensitively, so a ref read off a screen always works.
 
 use std::fmt;
+
 use thiserror::Error;
+
+/// Crockford base32: no `i`, `l`, `o`, or `u`.
+const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+pub const REF_LEN: usize = 4;
+const SLUG_MAX: usize = 60;
 
 #[derive(Debug, Error)]
 pub enum IdError {
-    #[error("invalid project name {0:?}: use lowercase letters, digits, and internal hyphens")]
-    BadProject(String),
+    #[error("no entry matches {0:?}: use its ref (like a7b3) or part of its title")]
+    NotFound(String),
     #[error("ambiguous reference {input:?}: matched {matches}")]
     Ambiguous { input: String, matches: String },
-    #[error(
-        "reference {0:?} is too short: use the {ALIAS_LEN}-character alias or at least {MIN_PREFIX} characters of an ID"
-    )]
-    TooShort(String),
-    #[error("task not found: {0}")]
-    NotFound(String),
+    #[error("empty reference")]
+    Empty,
 }
 
-impl miette::Diagnostic for IdError {}
-
-/// Crockford base32: no `i`, `l`, `o`, or `u`, so IDs stay unambiguous.
-const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-
-/// Length of a ULID in characters.
-pub const ID_LEN: usize = 26;
-/// Length of a short alias in characters.
-pub const ALIAS_LEN: usize = 4;
-/// Shortest ID prefix accepted as a reference.
-pub const MIN_PREFIX: usize = 4;
-
-// ---------------------------------------------------------------------------
-// ULID
-// ---------------------------------------------------------------------------
-
-/// A fresh, unique ID for a task created now.
-pub fn new_id() -> String {
-    new_id_at(now_ms())
-}
-
-/// A unique ID whose timestamp component is `ms` since the Unix epoch.
-pub fn new_id_at(ms: u64) -> String {
-    use rand::Rng as _;
-    let random: u128 = rand::rng().random::<u128>() & ((1u128 << 80) - 1);
-    let value = ((u128::from(ms) & 0xffff_ffff_ffff) << 80) | random;
-    encode(value)
-}
-
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
-}
-
-/// Big-endian 128-bit value → 26 Crockford characters.
-fn encode(mut value: u128) -> String {
-    let mut out = [0u8; ID_LEN];
-    for slot in out.iter_mut().rev() {
-        *slot = CROCKFORD[(value & 0x1f) as usize];
-        value >>= 5;
-    }
-    String::from_utf8(out.to_vec()).unwrap_or_default()
-}
-
-/// 26 Crockford characters → the 128-bit value, or `None` when malformed.
-pub fn decode(value: &str) -> Option<u128> {
-    let bytes = value.as_bytes();
-    if bytes.len() != ID_LEN {
-        return None;
-    }
-    let mut out: u128 = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        let digit = CROCKFORD.iter().position(|&c| c == b)? as u128;
-        // 26 * 5 = 130 bits, so the first character may only use two of them.
-        if i == 0 && digit > 7 {
-            return None;
-        }
-        out = (out << 5) | digit;
-    }
-    Some(out)
-}
-
-pub fn is_valid_id(s: &str) -> bool {
-    decode(s).is_some()
-}
-
-// ---------------------------------------------------------------------------
-// Alias
-// ---------------------------------------------------------------------------
-
-/// A random 4-character alias.
-pub fn new_alias() -> String {
+/// A fresh ref.
+pub fn new_ref() -> String {
     use rand::Rng as _;
     let mut rng = rand::rng();
-    (0..ALIAS_LEN)
+    (0..REF_LEN)
         .map(|_| CROCKFORD[rng.random_range(0..CROCKFORD.len())] as char)
         .collect()
 }
 
-pub fn is_valid_alias(s: &str) -> bool {
-    s.len() == ALIAS_LEN && s.bytes().all(|b| CROCKFORD.contains(&b))
+pub fn is_valid_ref(value: &str) -> bool {
+    value.len() == REF_LEN && value.bytes().all(|b| CROCKFORD.contains(&b))
 }
 
-// ---------------------------------------------------------------------------
-// Projects
-// ---------------------------------------------------------------------------
-
-fn is_project_char(b: u8) -> bool {
-    b.is_ascii_lowercase() || b.is_ascii_digit()
-}
-
-/// `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` without regex.
-pub fn validate_project(name: &str) -> Result<(), IdError> {
-    let b = name.as_bytes();
-    if b.is_empty() || !b[0].is_ascii_lowercase() {
-        return Err(IdError::BadProject(name.to_owned()));
-    }
-    let mut prev_dash = false;
-    for &c in &b[1..] {
-        if c == b'-' {
-            if prev_dash {
-                return Err(IdError::BadProject(name.to_owned()));
+/// A filename-safe slug of a title: lowercase, alphanumerics joined by `-`.
+pub fn slug(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut pending_dash = false;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
             }
-            prev_dash = true;
-        } else if is_project_char(c) {
-            prev_dash = false;
+            pending_dash = false;
+            out.push(ch.to_ascii_lowercase());
         } else {
-            return Err(IdError::BadProject(name.to_owned()));
+            pending_dash = true;
         }
     }
-    if prev_dash {
-        return Err(IdError::BadProject(name.to_owned()));
+    if out.len() > SLUG_MAX {
+        out.truncate(SLUG_MAX);
+        while out.ends_with('-') {
+            out.pop();
+        }
     }
-    Ok(())
+    if out.is_empty() {
+        out.push_str("entry");
+    }
+    out
 }
 
-// ---------------------------------------------------------------------------
-// Resolution
-// ---------------------------------------------------------------------------
-
-/// One record's identity, as the resolver sees it.
+/// One entry as the resolver sees it: identity, and whether it is finished.
+///
+/// The state is here because readiness depends on it — a blocker that is done
+/// stops blocking — and the resolver is already reading every entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Known {
-    pub id: String,
-    pub alias: String,
-    /// Aliases carried over from a migration, so pre-cutover references
-    /// (`project-ref`, a bare `ref`) keep resolving.
-    pub legacy_aliases: Vec<String>,
+    pub r#ref: String,
+    pub slug: String,
+    pub title: String,
+    pub state: crate::model::State,
 }
 
 impl Known {
-    /// Does this record answer to `needle` (already lowercased)?
-    fn answers_to(&self, needle: &str) -> bool {
-        self.alias == needle
-            || self
-                .legacy_aliases
-                .iter()
-                .any(|l| l.to_lowercase() == needle)
+    /// `<ref>-<slug>.json`: the ref is identity, the slug is a mnemonic that
+    /// makes a directory listing readable.
+    pub fn file_name(&self) -> String {
+        file_name_of(&self.r#ref, &self.slug)
     }
 }
 
-/// Resolve a user-supplied alias, ID, or ID prefix.
+/// `<ref>-<slug>.json`, or `<ref>.json` when a title produced no slug.
+pub fn file_name_of(r#ref: &str, slug: &str) -> String {
+    if slug.is_empty() {
+        format!("{ref}.json", ref = r#ref)
+    } else {
+        format!("{}-{}.json", r#ref, slug)
+    }
+}
+
+/// Parse `<ref>-<slug>.json`.
+pub fn parse_file_name(name: &str) -> Option<Known> {
+    let stem = name.strip_suffix(".json")?;
+    let (r#ref, slug) = stem.split_once('-').unwrap_or((stem, ""));
+    if !is_valid_ref(r#ref) {
+        return None;
+    }
+    Some(Known {
+        r#ref: r#ref.to_owned(),
+        slug: slug.to_owned(),
+        title: String::new(),
+        state: crate::model::State::Open,
+    })
+}
+
+/// Resolve a ref, or part of a title, to exactly one entry's ref.
 ///
-/// Ambiguity within a step is an error, never a guess.
+/// Refs are exactly four characters, so there is no prefix rule: a full ref, or
+/// a case-insensitive substring of the slug or title. Ambiguity is an error
+/// rather than a guess.
 pub fn resolve(known: &[Known], input: &str) -> Result<String, IdError> {
     let needle = input.trim().to_lowercase();
     if needle.is_empty() {
-        return Err(IdError::NotFound(input.to_owned()));
+        return Err(IdError::Empty);
     }
 
-    // 1. Exact alias (current or carried over from a migration).
-    let mut matches: Vec<&Known> = known.iter().filter(|k| k.answers_to(&needle)).collect();
-    if let Some(id) = single(&mut matches, input)? {
-        return Ok(id);
+    if let Some(entry) = known.iter().find(|k| k.r#ref == needle) {
+        return Ok(entry.r#ref.clone());
     }
 
-    // 2. Exact ID.
-    if let Some(k) = known.iter().find(|k| k.id == needle) {
-        return Ok(k.id.clone());
-    }
-
-    // 3. Unique ID prefix.
-    if needle.len() < MIN_PREFIX {
-        return Err(IdError::TooShort(input.to_owned()));
-    }
-    if !needle.bytes().all(|b| CROCKFORD.contains(&b)) {
-        return Err(IdError::NotFound(input.to_owned()));
-    }
-    let mut matches: Vec<&Known> = known.iter().filter(|k| k.id.starts_with(&needle)).collect();
-    match single(&mut matches, input)? {
-        Some(id) => Ok(id),
-        None => Err(IdError::NotFound(input.to_owned())),
-    }
-}
-
-/// `Ok(None)` for no matches, `Ok(Some(id))` for exactly one.
-///
-/// The ambiguity message names each candidate by alias, because a prefix that
-/// collides is nearly always two tasks created in the same millisecond, whose
-/// IDs agree for their first ten characters — quoting those would tell the
-/// reader nothing.
-fn single(matches: &mut Vec<&Known>, input: &str) -> Result<Option<String>, IdError> {
-    matches.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-    matches.dedup_by(|a, b| a.id == b.id);
+    let mut matches: Vec<&Known> = known
+        .iter()
+        .filter(|k| {
+            k.slug.to_lowercase().contains(&needle) || k.title.to_lowercase().contains(&needle)
+        })
+        .collect();
+    matches.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+    matches.dedup_by(|a, b| a.r#ref == b.r#ref);
     match matches.len() {
-        0 => Ok(None),
-        1 => Ok(Some(matches[0].id.clone())),
+        0 => Err(IdError::NotFound(input.to_owned())),
+        1 => Ok(matches[0].r#ref.clone()),
         _ => Err(IdError::Ambiguous {
             input: input.to_owned(),
             matches: matches
                 .iter()
                 .map(|k| {
-                    if k.alias.is_empty() {
-                        short_id(&k.id)
+                    if k.title.is_empty() {
+                        k.file_name()
                     } else {
-                        format!("{} ({})", k.alias, short_id(&k.id))
+                        format!("{} ({})", k.r#ref, k.title)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -229,161 +156,129 @@ fn single(matches: &mut Vec<&Known>, input: &str) -> Result<Option<String>, IdEr
     }
 }
 
-/// Enough of an ID to tell two of them apart in a message.
-fn short_id(id: &str) -> String {
-    id.chars().take(10).collect()
-}
-
-impl fmt::Display for Known {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.alias, self.id)
+impl miette::Diagnostic for IdError {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        let code = match self {
+            Self::NotFound(_) => crate::output::code::NOT_FOUND,
+            Self::Ambiguous { .. } => crate::output::code::AMBIGUOUS,
+            Self::Empty => crate::output::code::INVALID_INPUT,
+        };
+        Some(Box::new(code))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
-    /// Creation time (ms since the Unix epoch) encoded in an ID.
-    fn timestamp_ms(id: &str) -> Option<u64> {
-        Some((decode(id)? >> 80) as u64)
-    }
-
-    fn known(id: &str, alias: &str) -> Known {
+    fn known(r#ref: &str, slug: &str, title: &str) -> Known {
         Known {
-            id: id.to_owned(),
-            alias: alias.to_owned(),
-            legacy_aliases: Vec::new(),
+            r#ref: r#ref.to_owned(),
+            slug: slug.to_owned(),
+            title: title.to_owned(),
+            state: crate::model::State::Open,
         }
     }
 
     #[test]
-    fn ids_have_ulid_shape() {
-        for _ in 0..200 {
-            let id = new_id();
-            assert_eq!(id.len(), ID_LEN, "{id}");
-            assert!(is_valid_id(&id), "{id}");
-            // 26 * 5 = 130 bits, so the first character encodes only 2 bits.
-            assert!(id.as_bytes()[0] <= b'7', "{id}");
+    fn refs_have_shape_and_a_useful_space() {
+        let mut seen = HashSet::new();
+        for _ in 0..500 {
+            let r = new_ref();
+            assert!(is_valid_ref(&r), "{r}");
+            seen.insert(r);
+        }
+        assert!(seen.len() > 490, "refs must not collide often");
+        assert!(!is_valid_ref("abc"));
+        assert!(!is_valid_ref("abcdx"));
+        assert!(!is_valid_ref("ABCD"));
+        for confusable in ["a7bi", "a7bl", "a7bo", "a7bu"] {
+            assert!(!is_valid_ref(confusable), "{confusable}");
         }
     }
 
     #[test]
-    fn ids_sort_by_creation_time() {
-        // A later timestamp must never sort before an earlier one, whatever the
-        // random tail happens to be.
-        let early = (0..50).map(|_| new_id_at(1_000_000)).collect::<Vec<_>>();
-        let late = (0..50).map(|_| new_id_at(2_000_000)).collect::<Vec<_>>();
-        let max_early = early.iter().max().unwrap();
-        let min_late = late.iter().min().unwrap();
-        assert!(max_early < min_late, "{max_early} !< {min_late}");
+    fn an_alphabet_without_confusables() {
+        // i/l/o/u are absent, so a ref read off a screen cannot be confused with
+        // 1 or 0, and `l` cannot be mistaken for `1`.
+        for letter in ["i", "l", "o", "u"] {
+            assert!(
+                !is_valid_ref(&format!("a{letter}bc")),
+                "{letter} is not in the alphabet"
+            );
+        }
+        assert!(is_valid_ref("0123"));
+        assert!(is_valid_ref("vvvv"), "v is the last letter of the alphabet");
+        assert!(is_valid_ref("zzzz"), "z is too");
     }
 
     #[test]
-    fn ids_round_trip_through_decode() {
-        let id = new_id_at(1_700_000_000_123);
-        assert_eq!(timestamp_ms(&id), Some(1_700_000_000_123));
-        assert!(decode(&id).is_some());
+    fn slugs_are_filename_safe() {
+        assert_eq!(slug("Rewrite the auth layer"), "rewrite-the-auth-layer");
+        assert_eq!(slug("  Trailing -- dashes  "), "trailing-dashes");
+        assert_eq!(slug("feat: add 100% support!"), "feat-add-100-support");
+        assert_eq!(slug("日本語"), "entry");
+        assert_eq!(slug(""), "entry");
+        assert!(!slug(&"x".repeat(200)).contains("--"));
+        assert!(slug(&"x".repeat(200)).len() <= SLUG_MAX);
+    }
+
+    #[test]
+    fn file_names_round_trip() {
+        let k = known("a7b3", "rewrite-auth", "Rewrite auth");
+        assert_eq!(k.file_name(), "a7b3-rewrite-auth.json");
+        let parsed = parse_file_name("a7b3-rewrite-auth.json").expect("parses");
+        assert_eq!(parsed.r#ref, "a7b3");
+        assert_eq!(parsed.slug, "rewrite-auth");
+        assert!(parse_file_name("notes.json").is_none());
+        assert!(parse_file_name("README.md").is_none());
         assert!(
-            decode(&id.to_uppercase()).is_none(),
-            "alphabet is lowercase"
+            parse_file_name(".tk.json").is_none(),
+            "the store file is not an entry"
         );
-        assert!(decode("short").is_none());
-        // 26 valid characters whose value overflows 128 bits.
-        assert!(decode("zzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
+        assert_eq!(parse_file_name("a7b3.json").expect("parses").slug, "");
+        assert_eq!(file_name_of("a7b3", ""), "a7b3.json");
+        assert_eq!(file_name_of("a7b3", "x"), "a7b3-x.json");
     }
 
     #[test]
-    fn aliases_have_shape() {
-        for _ in 0..200 {
-            let a = new_alias();
-            assert!(is_valid_alias(&a), "{a}");
-        }
-        assert!(!is_valid_alias("abc"));
-        assert!(!is_valid_alias("ABCD"));
-        assert!(!is_valid_alias("iiii"), "ambiguous letters are excluded");
+    fn resolution_prefers_a_ref_then_a_unique_title() {
+        let entries = vec![
+            known("a7b3", "rewrite-auth", "Rewrite the auth layer"),
+            known("b7c4", "parser", "Write the parser"),
+        ];
+        assert_eq!(resolve(&entries, "a7b3").unwrap(), "a7b3");
+        assert_eq!(
+            resolve(&entries, "A7B3").unwrap(),
+            "a7b3",
+            "case-insensitive"
+        );
+        assert_eq!(resolve(&entries, "parser").unwrap(), "b7c4");
+        assert_eq!(
+            resolve(&entries, "AUTH").unwrap(),
+            "a7b3",
+            "title substring"
+        );
+        assert!(matches!(
+            resolve(&entries, "nope"),
+            Err(IdError::NotFound(_))
+        ));
+        assert!(matches!(resolve(&entries, ""), Err(IdError::Empty)));
     }
 
     #[test]
-    fn project_validation() {
-        for ok in ["tk", "my-app", "a1", "x-1-y-2"] {
-            assert!(validate_project(ok).is_ok(), "{ok}");
-        }
-        for bad in ["", "A", "-a", "a-", "a--b", "a_b", "a b", "1a", "A-b"] {
-            assert!(validate_project(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn resolution_prefers_alias_then_id_then_prefix() {
-        // Far enough apart that an 8-character prefix is unambiguous: the
-        // timestamp occupies the most significant bits of a ULID.
-        let id = new_id_at(1_700_000_000_000);
-        let other = new_id_at(1_900_000_000_000);
-        let known = vec![known(&id, "a7b3"), known(&other, "b7c4")];
-
-        assert_eq!(resolve(&known, "a7b3").unwrap(), id);
-        assert_eq!(resolve(&known, "A7B3").unwrap(), id, "case-insensitive");
-        assert_eq!(resolve(&known, &id).unwrap(), id);
-
-        let prefix = &id[..8];
-        assert_ne!(prefix, &other[..8], "test premise: prefixes differ");
-        assert_eq!(resolve(&known, prefix).unwrap(), id);
-    }
-
-    #[test]
-    fn an_ambiguous_prefix_lists_its_candidates() {
-        // Two records created in the same millisecond share a long prefix.
-        let a = new_id_at(1_700_000_000_000);
-        let mut b = new_id_at(1_700_000_000_000);
-        while b[..4] != a[..4] {
-            b = new_id_at(1_700_000_000_000);
-        }
-        let known = vec![known(&a, "aaaa"), known(&b, "bbbb")];
-        match resolve(&known, &a[..4]) {
+    fn ambiguity_is_an_error_not_a_guess() {
+        let entries = vec![
+            known("a7b3", "auth-rewrite", "Rewrite auth"),
+            known("b7c4", "auth-parser", "Parse auth"),
+        ];
+        match resolve(&entries, "auth") {
             Err(IdError::Ambiguous { matches, .. }) => {
-                // Candidates are named by alias: the IDs themselves agree for
-                // their first ten characters here, so quoting only IDs would
-                // not help the reader choose.
-                assert!(matches.contains("aaaa"), "{matches}");
-                assert!(matches.contains("bbbb"), "{matches}");
+                assert!(matches.contains("a7b3"), "{matches}");
+                assert!(matches.contains("b7c4"), "{matches}");
             }
             other => panic!("expected ambiguity, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn resolution_reports_the_failure_mode() {
-        let id = new_id_at(1_700_000_000_000);
-        let known = vec![known(&id, "a7b3")];
-        assert!(matches!(resolve(&known, "nope"), Err(IdError::NotFound(_))));
-        assert!(matches!(
-            resolve(&known, &id[..3]),
-            Err(IdError::TooShort(_))
-        ));
-        assert!(matches!(resolve(&known, ""), Err(IdError::NotFound(_))));
-    }
-
-    #[test]
-    fn aliases_prefer_the_shortest_form_and_legacy_names_resolve() {
-        let id = new_id_at(1_700_000_000_000);
-        let mut k = known(&id, "a7b3");
-        k.legacy_aliases.push("demo-a7b3".to_owned());
-        k.legacy_aliases.push("a7b3-old".to_owned());
-        let packed = vec![k];
-        assert_eq!(resolve(&packed, "demo-a7b3").unwrap(), id);
-        assert_eq!(resolve(&packed, "A7B3-OLD").unwrap(), id);
-        assert_eq!(resolve(&packed, "a7b3").unwrap(), id);
-    }
-
-    #[test]
-    fn two_records_cannot_claim_one_alias() {
-        let a = new_id_at(1);
-        let b = new_id_at(2);
-        let packed = vec![known(&a, "dup0"), known(&b, "dup0")];
-        assert!(matches!(
-            resolve(&packed, "dup0"),
-            Err(IdError::Ambiguous { .. })
-        ));
     }
 }

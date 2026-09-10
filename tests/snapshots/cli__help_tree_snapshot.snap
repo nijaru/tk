@@ -4,577 +4,386 @@ expression: tree
 ---
 === tk ===
 tk 1.0.0
-Minimal task tracker. Append-only JSON records in .tasks/ — no daemons, no
-runtime.
+Minimal task tracker. One JSON document per task in .tasks/ — no daemon, no
+index, no database.
 
 Usage: tk [FLAGS] <SUBCOMMAND>
 
 Commands:
-  accept      Add or change what must be true for this task to be done
-  add         Create a task
-  apply       Apply a batch of intents from stdin under one lock
-  archive     Archive a done/closed task without deleting it
-  block       Add a blocker dependency
-  check       Check store integrity (non-zero exit on findings)
-  checkpoint  Replace the current checkpoint (one summary, not the log)
-              [aliases: ck]
-  clean       Archive completed tasks older than a threshold
-  close       Close/cancel a task
-  config      Show or set configuration
-  defer       Defer a task
-  done        Complete a task
-  edit        Edit a task
-  evidence    Add or change how completion was verified
-  init        Initialize .tasks/ in the current directory
-  link        Add document links (paths or URLs) to a task
-  list        List tasks [aliases: ls]
-  lock        Run a command while holding the store mutation lock
-  log         Add a log entry to a task
-  mv          Move a task to a different project
-  open        Reset a task status to open
-  path        Print the resolved task store location
-  purge       Delete a task record [aliases: rm]
-  ready       List active/open unblocked tasks [aliases: rdy]
-  recover     Drop a record's torn last line (from an interrupted write)
-  show        Show task details
-  start       Mark a task as being worked on (open → active; not a claim)
-              [aliases: active]
-  unarchive   Return an archived task to active views
-  unblock     Remove a blocker dependency
-  unlink      Remove links from a task
-  help        Print this message or the help of the given subcommand(s)
+  accept   Add or change what must be true for a task to be done
+  add      Create a task [aliases: new]
+  apply    Apply a batch of intents from stdin under one lock
+  block    Add a blocker dependency
+  check    Check store integrity (non-zero exit on findings) [aliases: ck]
+  config   Show or change configuration
+  done     Mark a task done
+  drop     Drop a task without doing it
+  edit     Edit a task's fields in one write
+  init     Create .tasks/ here
+  label    Change a task's labels [aliases: tag]
+  list     List tasks [aliases: ls]
+  lock     Run a command while holding the store mutation lock
+  note     Add a log entry [aliases: log]
+  path     Print the resolved task store location
+  purge    Delete a task [aliases: rm]
+  ready    List what can be started now [aliases: rdy]
+  show     Show one task
+  state    Move a task to a state: open, done, or dropped
+  status   Replace the current status (the summary, not the log)
+  unblock  Remove a blocker dependency
+  help     Print this message or the help of the given subcommand(s)
 
 Flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
   -h, --help             Print help
   -V, --version          Print version
 
 === tk init ===
-Initialize .tasks/ in the current directory
+Create .tasks/ here
 
-Usage: tk init [-P --project <PROJECT>]
+Usage: tk init [--force]
 
 Flags:
-  -P, --project <PROJECT>  Project name (default: directory name)
-  -h, --help               Print help
+      --force            Initialize even if a store already exists here
+  -h, --help             Print help
 
 Global flags:
-  -j, --json               Output as JSON
-  -C, --dir <DIR>          Run in a different directory
-      --tasks-dir <DIR>    Task store directory: exact path, must already exist
-                           (no discovery)
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk add ===
 Create a task
 
-Usage: tk add [FLAGS] <TITLE>…
+Usage: tk add [FLAGS] <TITLE>
 
 Arguments:
-  <TITLE>…  Task title
+  <TITLE>  What needs doing
 
 Flags:
-  -p, --priority <PRIORITY>  Priority (0-4, p0-p4, or
-                             none/urgent/high/medium/low)
-  -P, --project <PROJECT>    Project (display grouping; identity is unaffected)
-  -d, --desc <DESC>          Description
-  -l, --labels <LABELS>      Labels (comma-separated, repeatable)
-      --parent <PARENT>      Parent task (alias, ID, or ID prefix)
-  -h, --help                 Print help
+  -l, --label <LABEL>     Labels, comma-separated
+      --accept <ACCEPT>   What must be true for this to count as done
+  -b, --blocked-by <REF>  A ref this task waits on
+      --status <STATUS>   A short note about where things stand
+  -q, --quiet             Print only the new ref
+  -h, --help              Print help
 
 Global flags:
-  -j, --json                 Output as JSON
-  -C, --dir <DIR>            Run in a different directory
-      --tasks-dir <DIR>      Task store directory: exact path, must already
-                             exist (no discovery)
+  -j, --json              Output as JSON
+  -C, --dir <DIR>         Run in a different directory (or a configured alias)
+      --tasks-dir <DIR>   Task store directory: exact path, must already exist
+                          (no discovery)
 
 === tk list ===
 List tasks
 
-Usage: tk list [FLAGS] [SEARCH]…
-
-Arguments:
-  [SEARCH]…  Search title, description, alias, and ID
+Usage: tk list [FLAGS]
 
 Flags:
-  -a, --all                  Show all, including done and closed
-      --archived             Show archived tasks only
-  -s, --status <STATUS>      Filter by status (open/active/deferred/done/closed)
-  -p, --priority <PRIORITY>  Filter by priority
-  -P, --project <PROJECT>    Filter by project
-  -l, --label <LABEL>        Filter by label
-      --parent <PARENT>      Filter by parent task
-      --roots                Top-level tasks only
-  -n, --limit <LIMIT>        Limit results (default 20)
-                             (default: 20)
-  -h, --help                 Print help
-
-Global flags:
-  -j, --json                 Output as JSON
-  -C, --dir <DIR>            Run in a different directory
-      --tasks-dir <DIR>      Task store directory: exact path, must already
-                             exist (no discovery)
-
-=== tk ready ===
-List active/open unblocked tasks
-
-Usage: tk ready
-
-Flags:
+  -q, --search <SEARCH>  Search titles, labels, and status
+  -a, --all              Include done and dropped entries
+  -s, --state <STATE>    Only this state: open, done, or dropped
+  -l, --label <LABEL>    Only this label
+      --blocked          Only blocked entries; --no-blocked for unblocked only
+      --unblocked        Only unblocked entries
+  -n, --limit <LIMIT>    Show at most this many
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk ready ===
+List what can be started now
+
+Usage: tk ready [FLAGS]
+
+Flags:
+      --all              Also show what is blocked, marked
+  -q, --search <SEARCH>  Search titles, labels, and status
+  -l, --label <LABEL>    Only this label
+  -n, --limit <LIMIT>    Show at most this many
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk show ===
-Show task details
+Show one task
 
-Usage: tk show <ID>
+Usage: tk show <REF>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>  Ref, or part of a title
 
 Flags:
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk start ===
-Mark a task as being worked on (open → active; not a claim)
+=== tk note ===
+Add a log entry
 
-Usage: tk start <ID>
+Usage: tk note [--if-rev <REV>] <REF> [MESSAGE]…
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>       Ref, or part of a title
+  [MESSAGE]…  What happened, in one line
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk open ===
-Reset a task status to open
+=== tk status ===
+Replace the current status (the summary, not the log)
 
-Usage: tk open <ID>
+Usage: tk status [--clear] [--if-rev <REV>] <REF> [TEXT]…
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>    Ref, or part of a title
+  [TEXT]…  Where things stand, in one line
 
 Flags:
+      --clear            Remove the status
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk defer ===
-Defer a task
+=== tk state ===
+Move a task to a state: open, done, or dropped
 
-Usage: tk defer <ID>
+Usage: tk state [--if-rev <REV>] <REF> <STATE>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>    Ref, or part of a title
+  <STATE>  open, done, or dropped
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk done ===
-Complete a task
+Mark a task done
 
-Usage: tk done <ID>
+Usage: tk done [--if-rev <REV>] <REF>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>  Ref, or part of a title
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk close ===
-Close/cancel a task
+=== tk drop ===
+Drop a task without doing it
 
-Usage: tk close <ID>
+Usage: tk drop [--if-rev <REV>] <REF>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>  Ref, or part of a title
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk label ===
+Change a task's labels
+
+Usage: tk label [--if-rev <REV>] <REF> <CHANGES>…
+
+Arguments:
+  <REF>       Ref, or part of a title
+  <CHANGES>…  +add, -remove, or a bare label to replace the whole set
+
+Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk edit ===
-Edit a task
+Edit a task's fields in one write
 
-Usage: tk edit [FLAGS] <ID>
+Usage: tk edit [FLAGS] <REF>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>  Ref, or part of a title
 
 Flags:
   -t, --title <TITLE>             New title
-  -p, --priority <PRIORITY>       New priority
-  -l, --labels <LABELS>           Labels: `+add` a value, or bare values to
-                                  replace the set
-
-                                  A leading `-` reads as a flag to the shell and
-                                  this parser alike, so use `--remove-label`;
-                                  `-l +x` and `--labels=-x` both work.
-      --remove-label <REMOVE_LABEL>  Labels to remove (comma-separated)
-      --parent <PARENT>           Parent task (or - to clear)
-  -d, --desc <DESC>               Description (or - to clear)
-      --if-rev <REV>              Reject the edit unless the task still has this
-                                  revision (`show --json`)
+      --slug <SLUG>               Move the file to a new slug (the ref never
+                                  changes)
+      --status <STATUS>           Replace the status
+      --clear-status              Remove the status
+  -l, --label <LABEL>             Replace the whole label set
+      --add-label <ADD_LABEL>     Add labels
+      --remove-label <REMOVE_LABEL>  Remove labels
+      --accept <ACCEPT>           Replace the acceptance criteria
+      --add-accept <ADD_ACCEPT>   Add acceptance criteria
+      --remove-accept <TEXT>      Remove acceptance criteria
+      --clear-accept              Remove every acceptance criterion
+  -b, --blocked-by <REF>          Replace the blockers
+      --add-block <REF>           Add one blocker
+      --remove-block <REF>        Remove one blocker
+  -n, --note <NOTE>               Add a log entry along with the rest
+      --if-rev <REV>              Refuse if the entry changed since this
+                                  revision was read
   -h, --help                      Print help
 
 Global flags:
   -j, --json                      Output as JSON
-  -C, --dir <DIR>                 Run in a different directory
+  -C, --dir <DIR>                 Run in a different directory (or a configured
+                                  alias)
       --tasks-dir <DIR>           Task store directory: exact path, must already
                                   exist (no discovery)
 
-=== tk checkpoint ===
-Replace the current checkpoint (one summary, not the log)
-
-Usage: tk checkpoint [--clear] [--if-rev <REV>] <ID> [TEXT]…
-
-Arguments:
-  <ID>     Task alias, ID, or ID prefix
-  [TEXT]…  Current result, blocker, next action, verification
-
-Flags:
-      --clear            Clear the checkpoint
-      --if-rev <REV>     Reject the update unless the task still has this
-                         revision
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk link ===
-Add document links to a task
-
-A link is a document reference (a path or URL). Use `parent` or `block` for
-relationships between tasks.
-
-Usage: tk link <ID> <REFS>…
-
-Arguments:
-  <ID>     Task alias, ID, or ID prefix
-  <REFS>…  References to add
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk unlink ===
-Remove links from a task
-
-Usage: tk unlink <ID> <REFS>…
-
-Arguments:
-  <ID>     Task alias, ID, or ID prefix
-  <REFS>…  References to remove
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
 === tk accept ===
-Add or change what must be true for this task to be done
+Add or change what must be true for a task to be done
 
-Usage: tk accept [--remove <TEXT>] [--clear] <ID> [VALUES]…
+Usage: tk accept [FLAGS] <REF> [CRITERIA]…
 
 Arguments:
-  <ID>       Task alias, ID, or ID prefix
-  [VALUES]…  Values to add
+  <REF>        Ref, or part of a title
+  [CRITERIA]…  Criteria to add
 
 Flags:
-      --remove <TEXT>    Remove an exact value (repeatable)
-      --clear            Remove all values
+      --set <SET>        Replace the whole list
+      --remove <TEXT>    Remove a criterion
+      --clear            Remove every criterion
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk evidence ===
-Add or change how completion was verified
-
-Usage: tk evidence [--remove <TEXT>] [--clear] <ID> [VALUES]…
-
-Arguments:
-  <ID>       Task alias, ID, or ID prefix
-  [VALUES]…  Values to add
-
-Flags:
-      --remove <TEXT>    Remove an exact value (repeatable)
-      --clear            Remove all values
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk archive ===
-Archive a done/closed task without deleting it
-
-Usage: tk archive [--if-rev <REV>] <ID>
-
-Arguments:
-  <ID>  Task alias, ID, or ID prefix
-
-Flags:
-      --if-rev <REV>     Reject the change unless the task still has this
-                         revision
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk unarchive ===
-Return an archived task to active views
-
-Usage: tk unarchive <ID>
-
-Arguments:
-  <ID>  Task alias, ID, or ID prefix
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk log ===
-Append a log entry to a task
-
-The log is history: entries are never edited or removed. Use `checkpoint` for
-the replaceable "where things stand" summary.
-
-Usage: tk log <ID> [MSG]…
-
-Arguments:
-  <ID>    Task alias, ID, or ID prefix
-  [MSG]…  Log message
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk block ===
 Add a blocker dependency
 
-Usage: tk block <ID> <BLOCKER>
+Usage: tk block [--if-rev <REV>] <REF> <BLOCKER>…
 
 Arguments:
-  <ID>       Task to block (alias, ID, or ID prefix)
-  <BLOCKER>  Blocking task
+  <REF>       Ref, or part of a title
+  <BLOCKER>…  What it waits on: one or more refs or title fragments
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk unblock ===
 Remove a blocker dependency
 
-Usage: tk unblock <ID> <BLOCKER>
+Usage: tk unblock [--if-rev <REV>] <REF> <BLOCKER>…
 
 Arguments:
-  <ID>       Task alias, ID, or ID prefix
-  <BLOCKER>  Blocking task to remove
+  <REF>       Ref, or part of a title
+  <BLOCKER>…  What it no longer waits on
 
 Flags:
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk purge ===
-Delete a task record
+Delete a task
 
-Refuses while other tasks still block on it or name it as a parent: those
-references would dangle, and a broken graph is worse than a stale record.
-
-Usage: tk purge [FLAGS] <ID>
+Usage: tk purge [--dry-run] [--if-rev <REV>] <REF>
 
 Arguments:
-  <ID>  Task alias, ID, or ID prefix
+  <REF>  Ref, or part of a title
 
 Flags:
-  -f, --force            Skip confirmation
-      --scrub            Delete anyway, removing the references that point at it
-      --if-rev <REV>     Reject the delete unless the task still has this
-                         revision
+      --dry-run          Say what would be deleted, and delete nothing
+      --if-rev <REV>     Refuse if the entry changed since this revision was
+                         read
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
-
-=== tk recover ===
-Drop a record's torn last line, left behind by an interrupted write
-
-Only the incomplete final line is removed: it was never a complete event, so
-nothing that was appended is lost.
-
-Usage: tk recover [--dry-run] [ID]
-
-Arguments:
-  [ID]  Task alias, ID, or ID prefix (default: every record)
-
-Flags:
-      --dry-run          Report what would be dropped without changing anything
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk mv ===
-Move a task to a different project
-
-Identity is unaffected: a move changes one display field, and no reference
-anywhere needs rewriting. To rename a project for every task in it, use `tk
-config project rename`.
-
-Usage: tk mv <SOURCE> <PROJECT>
-
-Arguments:
-  <SOURCE>   Task alias, ID, or ID prefix
-  <PROJECT>  Target project name
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk apply ===
-Apply a batch of intents from stdin under one lock
-
-Every intent is resolved and validated before anything is written, so a batch
-that is wrong is rejected whole. Intents run in order; see `tk apply --help` in
-the README for the accepted `op` values.
-
-Usage: tk apply [--dry-run]
-
-Flags:
-      --dry-run          Validate the batch and report what would change,
-                         without writing
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk clean ===
-Archive completed tasks older than a threshold
-
-Usage: tk clean [--older-than <OLDER_THAN>] [--purge]
-
-Flags:
-      --older-than <OLDER_THAN>  Age in days (default: the store's clean-after
-                                 setting)
-      --purge                    Delete the records instead of archiving them
-                                 (scrubs references)
-  -h, --help                     Print help
-
-Global flags:
-  -j, --json                     Output as JSON
-  -C, --dir <DIR>                Run in a different directory
-      --tasks-dir <DIR>          Task store directory: exact path, must already
-                                 exist (no discovery)
 
 === tk check ===
-Check store integrity
+Check store integrity (non-zero exit on findings)
 
-Exits non-zero when anything is reported, so scripts and agents cannot mistake
-findings for success.
-
-Usage: tk check
+Usage: tk check [-q --quiet]
 
 Flags:
+  -q, --quiet            Print nothing when the store is clean
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
@@ -588,126 +397,75 @@ Flags:
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk lock ===
 Run a command while holding the store mutation lock
 
-The lock serializes cooperating tk writers (and, when used for sync, the
-checkout itself). The command must not run tk against the same store: the lock
-is advisory and not reentrant.
-
-Usage: tk lock [--scan <DIR>] [-- COMMAND]…
+Usage: tk lock [-- COMMAND]…
 
 Arguments:
-  [-- COMMAND]…  Command to run while holding the lock, after --
+  [-- COMMAND]…  The command to run, after --
 
 Flags:
-      --scan <DIR>       Directory tree to scan for task stores to lock
-                         (repeatable)
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk config ===
-Show or set configuration
+Show or change configuration
 
 Usage: tk config <SUBCOMMAND>
 
 Commands:
-  alias    Manage directory aliases for -C
-  project  Rename a project in every task that uses it
-  set      Set one setting: project, priority, labels, or clean-after
-  help     Print this message or the help of the given subcommand(s)
+  alias  Name a directory so -C can find it
+  help   Print this message or the help of the given subcommand(s)
 
 Flags:
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config set ===
-Set one setting: project, priority, labels, or clean-after
-
-Usage: tk config set <KEY> <VALUE>
-
-Arguments:
-  <KEY>    project | priority | labels | clean-after
-  <VALUE>  New value ("off" disables clean-after; an empty labels list clears
-           them)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
 === tk config alias ===
-Manage directory aliases for -C
+Name a directory so -C can find it
 
-Usage: tk config alias [-r --rm] [NAME] [PATH]
+Usage: tk config alias <NAME> [PATH]
 
 Arguments:
-  [NAME]  Alias name
-  [PATH]  Directory path
+  <NAME>  The name to type after -C
+  [PATH]  The directory it points at; omit to remove the alias
 
 Flags:
-  -r, --rm               Remove the alias
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk config project ===
-Rename a project in every task that uses it
+=== tk apply ===
+Apply a batch of intents from stdin under one lock
 
-Usage: tk config project <SUBCOMMAND>
-
-Commands:
-  rename  Rename a project in every task that uses it
-  help    Print this message or the help of the given subcommand(s)
+Usage: tk apply [-f --file <PATH>] [--dry-run]
 
 Flags:
+  -f, --file <PATH>      Read the batch from a file instead of stdin
+      --dry-run          Report what would change, and change nothing
   -h, --help             Print help
 
 Global flags:
   -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config project rename ===
-Rename a project in every task that uses it
-
-A project is a display field, so this changes one field per task and rewrites no
-references.
-
-Usage: tk config project rename <OLD> <NEW>
-
-Arguments:
-  <OLD>  Current project name
-  <NEW>  New project name
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
+  -C, --dir <DIR>        Run in a different directory (or a configured alias)
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)

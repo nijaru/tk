@@ -1,216 +1,381 @@
-//! The v0 → v1 migration is a one-shot script, not a `tk` subcommand, so its
-//! coverage lives here: build a v0 store, convert it, and check that the v1
-//! binary is happy with the result.
+//! The migration script, run against fixtures for both older layouts.
 //!
-//! Skipped when `python3` is unavailable, rather than failing on a machine that
-//! cannot run the script at all.
+//! The script is deliberately not a `tk` subcommand — it runs once per store —
+//! so this is the only thing that keeps it working. The strongest check is not
+//! here but in the binary: after converting, `tk check` must find nothing wrong,
+//! which means the conversion produced documents this binary accepts.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
-fn python() -> Option<String> {
-    for candidate in ["python3", "python"] {
-        let ok = Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if ok {
-            return Some(candidate.to_owned());
-        }
-    }
-    None
+const SCRIPT: &str = "tools/migrate_to_v3.py";
+
+/// The path to a usable `python3`, or `None` to skip.
+fn python3() -> Option<PathBuf> {
+    let out = Command::new("python3").arg("--version").output().ok()?;
+    out.status.success().then(|| PathBuf::from("python3"))
 }
 
-fn bin() -> Command {
+fn migrate(store: &Path, args: &[&str]) -> Output {
+    Command::new(python3().expect("python3"))
+        .arg(SCRIPT)
+        .args(args)
+        .arg(store)
+        .output()
+        .expect("run the migration script")
+}
+
+fn tk(store: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tk"))
-}
-
-fn run_in(dir: &Path, args: &[&str]) -> std::process::Output {
-    bin()
-        .arg("-C")
-        .arg(dir)
+        .args(["--tasks-dir", &store.display().to_string()])
         .args(args)
         .output()
-        .expect("spawn tk")
+        .expect("run tk")
 }
 
-fn ok_in(dir: &Path, args: &[&str]) -> String {
-    let out = run_in(dir, args);
-    assert!(
-        out.status.success(),
-        "tk {args:?} failed: {}",
+fn summary(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    )
 }
 
-fn store_dir(dir: &Path) -> PathBuf {
-    dir.join(".tasks")
-}
-
-/// A v0 store with the shapes that actually appear in the wild: a legacy
-/// string log with an embedded timestamp, an unknown field, a `cancelled`
-/// status, a cross-task reference, and two projects sharing a ref.
-fn write_v0_store(dir: &Path) {
-    let tasks = store_dir(dir);
-    std::fs::create_dir_all(&tasks).expect("mkdir");
-    std::fs::write(
-        tasks.join("config.json"),
-        r#"{"version":1,"project":"demo","defaults":{"priority":3,"labels":["x"],"assignees":[]},"clean_after":14}"#,
-    )
-    .expect("config");
-    std::fs::write(
-        tasks.join("demo-a7b3.json"),
-        r#"{"project":"demo","ref":"a7b3","title":"Implement auth","status":"active",
-            "priority":1,"labels":["backend"],"assignees":["nick"],"blocked_by":[],
-            "logs":["2026-01-10: started","just a note"],
-            "created_at":"2026-01-10T12:00:00Z","updated_at":"2026-02-01T09:30:00Z",
-            "checkpoint":"halfway","links":["docs/x.md"],"acceptance":["tests pass"],
-            "evidence":[],"external":{"github":{"number":1}}}"#,
-    )
-    .expect("task a");
-    std::fs::write(
-        tasks.join("demo-b7c4.json"),
-        r#"{"project":"demo","ref":"b7c4","title":"Write tests","status":"cancelled",
-            "priority":2,"blocked_by":["demo-a7b3"],"logs":[],
-            "created_at":"2026-01-11T12:00:00Z","updated_at":"2026-01-12T12:00:00Z",
-            "completed_at":"2026-01-12T12:00:00Z"}"#,
-    )
-    .expect("task b");
-    std::fs::write(
-        tasks.join("other-b7c4.json"),
-        r#"{"project":"other","ref":"b7c4","title":"Duplicate ref elsewhere","status":"open",
-            "priority":3,"blocked_by":[],"logs":[],
-            "created_at":"2026-01-13T12:00:00Z","updated_at":"2026-01-13T12:00:00Z"}"#,
-    )
-    .expect("task c");
-}
-
-fn migrate(dir: &Path, extra: &[&str]) -> std::process::Output {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/migrate-v0.py");
-    let mut command = Command::new(python().expect("python3 checked by caller"));
-    command
-        .arg(script)
-        .arg(".tasks")
-        .args(extra)
-        .current_dir(dir);
-    command.output().expect("spawn migration")
-}
-
-#[test]
-fn a_v0_store_migrates_into_a_clean_v1_store() {
-    let Some(_) = python() else {
-        eprintln!("skipping: python3 is not available to run tools/migrate-v0.py");
-        return;
-    };
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_v0_store(dir.path());
-
-    // A dry run must not touch anything.
-    let dry = migrate(dir.path(), &["--dry-run"]);
-    assert!(
-        dry.status.success(),
-        "{}",
-        String::from_utf8_lossy(&dry.stderr)
-    );
-    assert!(!store_dir(dir.path()).join("store.json").exists());
-    assert!(!store_dir(dir.path()).join("records").exists());
-
-    let out = migrate(dir.path(), &[]);
-    assert!(
-        out.status.success(),
-        "migration failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // The v1 binary accepts the result, with no findings.
-    ok_in(dir.path(), &["check"]);
-
-    // Fields survive, including the legacy log split and the unknown field
-    // being ignored rather than fatal.
-    let a = ok_in(dir.path(), &["show", "demo-a7b3", "--json"]);
-    let a: serde_json::Value = serde_json::from_str(&a).expect("show --json");
-    let a = &a["data"];
-    assert_eq!(a["title"], "Implement auth");
-    assert_eq!(a["status"], "active");
-    assert_eq!(a["priority"], serde_json::json!(1));
-    assert_eq!(a["checkpoint"], "halfway");
-    assert_eq!(a["links"], serde_json::json!(["docs/x.md"]));
-    assert_eq!(a["acceptance"], serde_json::json!(["tests pass"]));
-    assert_eq!(
-        a["legacy_aliases"],
-        serde_json::json!(["demo-a7b3"]),
-        "the old ID must stay resolvable"
-    );
-    let logs: Vec<&str> = a["logs"]
+/// Read the entry whose title matches, as the store's own reader sees it.
+fn entry_with_title(store: &Path, title: &str) -> serde_json::Value {
+    let out = tk(store, &["-j", "ls", "-a"]);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("envelope");
+    envelope["data"]
         .as_array()
-        .expect("logs")
+        .expect("entries")
         .iter()
-        .map(|l| l["msg"].as_str().unwrap_or_default())
+        .find(|entry| entry["title"] == title)
+        .unwrap_or_else(|| panic!("no entry titled {title:?} in {}", envelope["data"]))
+        .clone()
+}
+
+/// Entry files only: `<ref>-<slug>.json` with a valid tk ref. A v0 or v1 store
+/// has `.json` files of its own, so counting those would hide the difference
+/// between "converted" and "not yet converted".
+fn entry_files(store: &Path) -> Vec<String> {
+    let crockford = "0123456789abcdefghjkmnpqrstvwxyz";
+    let mut names: Vec<String> = std::fs::read_dir(store)
+        .expect("read store")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            let Some((head, _)) = name
+                .strip_suffix(".json")
+                .and_then(|stem| stem.split_once('-'))
+            else {
+                return false;
+            };
+            head.len() == 4 && head.chars().all(|c| crockford.contains(c))
+        })
         .collect();
-    assert_eq!(logs, vec!["started", "just a note"], "{a}");
+    names.sort();
+    names
+}
 
-    // The old handle keeps working: the ref became the alias.
-    assert_eq!(a["alias"], "a7b3");
-    ok_in(dir.path(), &["show", "a7b3"]);
+/// Every `.json` file at the top level, whatever it is.
+fn all_json_files(store: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(store)
+        .expect("read store")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    names.sort();
+    names
+}
 
-    // References were rewritten to new IDs, not left pointing at v0 names.
-    let b = ok_in(dir.path(), &["show", "demo-b7c4", "--json"]);
-    let b: serde_json::Value = serde_json::from_str(&b).expect("show --json");
-    let b = &b["data"];
-    assert_eq!(b["status"], "closed", "`cancelled` becomes `closed`");
-    assert_eq!(b["completed_at"], "2026-01-12T12:00:00Z");
-    let blocked_by = b["blocked_by"].as_array().expect("blocked_by");
-    assert_eq!(blocked_by.len(), 1);
-    let blocker = blocked_by[0].as_str().expect("blocker id");
-    assert!(blocker.starts_with("01"), "remapped to a ULID: {blocker}");
-    assert_eq!(
-        blocker,
-        a["id"].as_str().unwrap(),
-        "the blocker must be the migrated task"
+/// A v0 store: `config.json` plus one JSON document per task.
+fn v0_fixture() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join(".tasks");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("config.json"),
+        r#"{"project":"proj","version":1,"defaults":{"priority":"medium","labels":[]},"clean_after":{"enabled":true,"days":30}}"#,
+    )
+    .unwrap();
+    let write = |ref_: &str, body: serde_json::Value| {
+        std::fs::write(
+            store.join(format!("proj-{ref_}.json")),
+            serde_json::to_string_pretty(&body).unwrap(),
+        )
+        .unwrap();
+    };
+    write(
+        "a7b3",
+        serde_json::json!({
+            "project": "proj", "ref": "a7b3", "title": "Rewrite the auth layer",
+            "description": "A long description that v2 has no field for.",
+            "status": "done", "priority": "high",
+            "labels": ["Backend", "backend", "api"],
+            "logs": ["2026-01-10: did a thing", {"ts": "2026-01-11T09:00:00Z", "msg": "second"}],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-11T09:00:00Z",
+            "completed_at": "2026-01-10T12:00:00Z",
+            "checkpoint": "nearly there",
+            "links": ["https://example.com/spec"],
+            "acceptance": ["parity test passes", {"text": "docs updated"}],
+            "evidence": ["ran the full suite"],
+            "blocked_by": ["proj-b7c4"], "parent": "proj-c7d5",
+            "assignees": ["nick"], "due_date": "2026-02-01", "estimate": 3,
+            "previous_ids": ["proj-old1"], "external": {"url": "x"}
+        }),
     );
-
-    // Two projects sharing a ref cannot both keep it, so neither bare ref
-    // resolves ambiguously.
-    let c = ok_in(dir.path(), &["show", "other-b7c4", "--json"]);
-    let c: serde_json::Value = serde_json::from_str(&c).expect("show --json");
-    assert_ne!(c["data"]["alias"], "b7c4");
-    let list = ok_in(dir.path(), &["list", "-a"]);
-    assert_eq!(
-        list.matches("b7c4").count(),
-        0,
-        "no bare ref collision: {list}"
+    write(
+        "b7c4",
+        serde_json::json!({
+            "project": "proj", "ref": "b7c4", "title": "Write the parser",
+            "status": "cancelled", "priority": "low", "labels": [],
+            "logs": null, "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-05T00:00:00Z"
+        }),
     );
-
-    // Old files are kept, not deleted, and a second run refuses.
-    assert!(store_dir(dir.path()).join("legacy/demo-a7b3.json").exists());
-    let again = migrate(dir.path(), &[]);
-    assert!(!again.status.success(), "a second migration must refuse");
-    assert!(
-        String::from_utf8_lossy(&again.stderr).contains("already a v1 store"),
-        "{}",
-        String::from_utf8_lossy(&again.stderr)
+    write(
+        "c7d5",
+        serde_json::json!({
+            "project": "proj", "ref": "c7d5", "title": "Deferred thing",
+            "status": "deferred", "priority": "none", "labels": ["someday"],
+            "created_at": "2026-01-03T00:00:00Z", "updated_at": "2026-01-04T00:00:00Z"
+        }),
     );
+    (dir, store)
+}
+
+/// A v1 store: `store.json` plus `records/<ulid>.jsonl` event logs.
+fn v1_fixture() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join(".tasks");
+    let records = store.join("records");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(store.join("store.json"), r#"{"format":2,"project":"proj"}"#).unwrap();
+
+    let id = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
+    let created = serde_json::json!({
+        "id": id, "alias": "z9y8", "legacy_aliases": ["proj-old2"], "project": "proj",
+        "title": "V1 thing", "description": null, "status": "open", "priority": "medium",
+        "labels": [], "parent": null, "blocked_by": [], "logs": [],
+        "created_at": "2026-03-01T00:00:00Z", "updated_at": "2026-03-01T00:00:00Z",
+        "completed_at": null, "archived_at": null, "checkpoint": null,
+        "links": [], "acceptance": [], "evidence": []
+    });
+    let events = [
+        serde_json::json!({"ts":"2026-03-01T00:00:00Z","writer":"w","op":"created","data":created}),
+        serde_json::json!({"ts":"2026-03-02T00:00:00Z","writer":"w","op":"log","data":{"msg":"first"}}),
+        // `status`, `checkpoint`, and `labels.add` carry a bare value: v1's
+        // folder deserialised the event's `data` directly as the field type.
+        serde_json::json!({"ts":"2026-03-03T00:00:00Z","writer":"w","op":"labels.add","data":["backend"]}),
+        serde_json::json!({"ts":"2026-03-04T00:00:00Z","writer":"w","op":"checkpoint","data":"halfway"}),
+        serde_json::json!({"ts":"2026-03-05T00:00:00Z","writer":"w","op":"acceptance.add","data":["works"]}),
+        serde_json::json!({"ts":"2026-03-06T00:00:00Z","writer":"w","op":"status","data":"done"}),
+    ];
+    let body: String = events.iter().map(|event| format!("{event}\n")).collect();
+    std::fs::write(records.join(format!("{id}.jsonl")), body).unwrap();
+    (dir, store)
 }
 
 #[test]
-fn a_v1_store_is_never_migrated() {
-    let Some(_) = python() else {
-        eprintln!("skipping: python3 is not available to run tools/migrate-v0.py");
+fn a_v0_store_converts_to_the_documented_shape() {
+    if python3().is_none() {
+        eprintln!("skipping: python3 is not available");
         return;
-    };
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    ok_in(dir.path(), &["add", "already v1"]);
+    }
+    let (_tmp, store) = v0_fixture();
 
-    let out = migrate(dir.path(), &[]);
-    assert!(!out.status.success());
+    // A dry run changes nothing.
+    let out = migrate(&store, &["--dry-run"]);
+    assert!(out.status.success(), "{}", summary(&out));
+    assert!(!store.join(".tk.json").exists(), "a dry run writes nothing");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("already a v1 store"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        entry_files(&store).is_empty(),
+        "a dry run converts nothing: {:?}",
+        entry_files(&store)
     );
-    // The v1 store is untouched.
-    ok_in(dir.path(), &["check"]);
-    assert!(ok_in(dir.path(), &["list"]).contains("already v1"));
+    assert_eq!(
+        all_json_files(&store).len(),
+        4,
+        "and the sources are still where they were: {:?}",
+        all_json_files(&store)
+    );
+
+    let out = migrate(&store, &[]);
+    assert!(out.status.success(), "{}", summary(&out));
+    let text = summary(&out);
+    assert!(text.contains("entries converted:   3"), "{text}");
+    // Dropped fields are counted, never silently discarded.
+    for field in [
+        "description",
+        "priority",
+        "project",
+        "due_date",
+        "estimate",
+        "parent",
+    ] {
+        assert!(
+            text.contains(field),
+            "{field} should be reported as dropped: {text}"
+        );
+    }
+
+    // The format gate accepts what it produced.
+    let out = tk(&store, &["check"]);
+    assert!(
+        out.status.success(),
+        "the migrated store must be valid: {}",
+        summary(&out)
+    );
+
+    // Every entry, including the closed ones, is there.
+    assert_eq!(
+        entry_files(&store).len(),
+        3,
+        "files: {:?}\nsummary: {text}",
+        entry_files(&store)
+    );
+    let ids = std::fs::read_to_string(store.join(".tk.json")).unwrap();
+    assert!(ids.contains("\"format\": 3"), "{ids}");
+
+    // The done entry kept its completion time and everything v2 has a field for.
+    let done = entry_with_title(&store, "Rewrite the auth layer");
+    assert_eq!(done["state"], "done");
+    assert_eq!(done["done"], serde_json::json!("2026-01-10T12:00:00Z"));
+    assert_eq!(
+        done["status"],
+        serde_json::json!("nearly there"),
+        "checkpoint -> status"
+    );
+    assert_eq!(
+        done["labels"],
+        serde_json::json!(["api", "backend"]),
+        "labels normalise"
+    );
+    assert_eq!(
+        done["acceptance"],
+        serde_json::json!(["parity test passes", "docs updated"]),
+        "acceptance keeps strings and reads an object's text"
+    );
+    let log = done["log"].as_array().expect("a log");
+    assert_eq!(log[0]["msg"], "did a thing", "a legacy log string is split");
+    assert!(
+        log[0]["ts"].as_str().unwrap().starts_with("2026-01-10"),
+        "the date comes out of the string: {log:?}"
+    );
+    assert_eq!(log[1]["msg"], "second");
+    assert_eq!(
+        log[2]["msg"], "verified: ran the full suite",
+        "evidence -> log"
+    );
+
+    // A blocker is remapped to the new store's ref for the same entry.
+    let parser = entry_with_title(&store, "Write the parser");
+    assert_eq!(done["blocked_by"], serde_json::json!([parser["ref"]]));
+    assert_eq!(parser["state"], "dropped", "cancelled becomes dropped");
+    assert!(
+        parser["done"].as_str().is_some(),
+        "a dropped entry has a time"
+    );
+    assert!(
+        parser["log"].as_array().unwrap().is_empty(),
+        "a null log list"
+    );
+
+    let deferred = entry_with_title(&store, "Deferred thing");
+    assert_eq!(deferred["state"], "open", "deferred becomes open");
+    assert_eq!(deferred["done"], serde_json::Value::Null);
+
+    // Sources are moved, never deleted.
+    assert!(store.join("legacy").is_dir());
+    assert!(store.join("legacy/config.json").exists());
+    assert_eq!(
+        entry_files(&store).len(),
+        3,
+        "the old top-level task files are not still sitting there"
+    );
+    let moved = std::fs::read_dir(store.join("legacy")).unwrap().count();
+    assert_eq!(moved, 4, "config.json plus three task files");
+}
+
+#[test]
+fn a_v1_store_converts_by_folding_its_events() {
+    if python3().is_none() {
+        eprintln!("skipping: python3 is not available");
+        return;
+    }
+    let (_tmp, store) = v1_fixture();
+
+    let out = migrate(&store, &[]);
+    assert!(out.status.success(), "{}", summary(&out));
+    assert!(
+        tk(&store, &["check"]).status.success(),
+        "{}",
+        summary(&tk(&store, &["check"]))
+    );
+
+    let entry = entry_with_title(&store, "V1 thing");
+    assert_eq!(entry["state"], "done", "the folded status");
+    assert_eq!(
+        entry["status"],
+        serde_json::json!("halfway"),
+        "checkpoint -> status"
+    );
+    assert_eq!(entry["labels"], serde_json::json!(["backend"]));
+    assert_eq!(entry["acceptance"], serde_json::json!(["works"]));
+    assert_eq!(entry["log"][0]["msg"], "first");
+    assert_eq!(entry["log"][0]["ts"], "2026-03-02T00:00:00Z");
+    assert!(
+        entry["done"].as_str().is_some(),
+        "a closed entry has a time"
+    );
+    assert_eq!(
+        entry["ref"], "z9y8",
+        "a valid, free v1 alias is reused as the ref"
+    );
+
+    // The old ULID and the alias both map, so an old reference still resolves.
+    let map = std::fs::read_to_string(store.join("MIGRATION.md")).unwrap();
+    assert!(map.contains("01HZZZZZZZZZZZZZZZZZZZZZZZ"), "{map}");
+    assert!(map.contains("proj-old2"), "{map}");
+    assert!(map.contains("z9y8"), "{map}");
+
+    // The old layout is gone, not read as empty by the next run.
+    assert!(!store.join("store.json").exists());
+    assert!(!store.join("records").exists());
+    assert!(store.join("legacy/store.json").exists());
+    assert!(store.join("legacy/records").is_dir());
+}
+
+#[test]
+fn converting_twice_is_refused() {
+    if python3().is_none() {
+        eprintln!("skipping: python3 is not available");
+        return;
+    }
+    let (_tmp, store) = v0_fixture();
+    assert!(migrate(&store, &[]).status.success());
+    let out = migrate(&store, &[]);
+    assert!(!out.status.success(), "a second run must refuse");
+    assert!(summary(&out).contains(".tk.json"), "{}", summary(&out));
+}
+
+/// An empty store is refused, because converting nothing is more likely a wrong
+/// directory than an intention. `tk init` starts a fresh store instead.
+#[test]
+fn an_empty_store_is_refused_rather_than_converted() {
+    if python3().is_none() {
+        eprintln!("skipping: python3 is not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join(".tasks");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("config.json"), r#"{"project":"proj"}"#).unwrap();
+    let out = migrate(&store, &[]);
+    assert!(!out.status.success());
+    assert!(summary(&out).contains("no entries"), "{}", summary(&out));
+    // Nothing was written, so the directory is still recognisably v0.
+    assert!(!store.join(".tk.json").exists());
+    assert!(!store.join("legacy").exists());
 }

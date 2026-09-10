@@ -1,84 +1,84 @@
-//! Filesystem store: location resolution, the format gate, the mutation lock,
-//! and every task operation.
+//! Filesystem store: location, the format gate, the mutation lock, and the only
+//! code that touches entry files.
 //!
-//! Two entry points, and the difference between them is the point:
+//! Three entry points, and the difference between them is the point:
 //!
-//! - [`Ctx::store`] gives a [`Store`]: reads, plus appends that are
-//!   last-writer-wins or commutative. No lock, so `tk log` from one agent never
-//!   blocks another.
-//! - [`Ctx::txn`] gives a [`Txn`]: holds the store lock and additionally
-//!   exposes the operations that must validate *other* records (`block`),
-//!   enforce uniqueness (`create`), read-then-write one record conditionally
-//!   (`--if-rev`), or touch several records (`rename_project`, `purge
-//!   --scrub`, `clean --purge`, `recover`).
+//! - [`Ctx::store`] gives a [`Store`]: reads, no lock.
+//! - [`Ctx::txn`] gives a [`Txn`]: holds the store lock, and is the only thing
+//!   that writes an entry. Every mutation goes through it, so the lock cannot be
+//!   forgotten by accident — there is no unlocked write path.
+//! - [`Ctx::txn_init`] additionally allows creating the store.
 //!
-//! Composite operations live only on `Txn`, so the lock cannot be forgotten by
-//! accident: there is no unlocked path to them.
+//! One lock for the whole store, held across read-modify-write, because every
+//! mutation is now a whole-file rewrite. v1's lock-free appends came from the
+//! event log, which is gone; what replaced it is a short critical section and a
+//! file rename that is either complete or absent.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use thiserror::Error;
 
-use crate::ids::{self, IdError};
-use crate::model::{self, Config, Priority, Status, TaskState, TaskView};
+use crate::ids::{self, IdError, Known};
+use crate::model::{Config, Entry, EntryView, State};
 use crate::output::code;
-use crate::record::{self, Event, Record, op};
-use crate::timeutil;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
-    #[error("no .tasks/ directory found. Run 'tk init' to create one.\nSearched from: {0}")]
+    #[error("no {TASKS_DIR}/ directory found. Run 'tk init' to create one.\nSearched from: {0}")]
     TasksNotFound(String),
     #[error(
         "task store not found: {path}\n{origin} was set explicitly, so tk will not create a store there.\nCreate it deliberately with 'tk --tasks-dir {path} init', or point at an existing store."
     )]
     ExplicitStoreMissing { path: String, origin: String },
     #[error(
-        "not a tk v1 store at {path}\n  {detail}\nThis binary reads only format {format} stores. Convert a legacy store with tools/migrate-v0.py, or create a fresh one with 'tk init'."
+        "not a tk format-{format} store at {path}\n  {detail}\nThis binary reads only format {format} stores. Convert an older store with tools/migrate_to_v3.py, or start a fresh one with 'tk init'."
     )]
-    NotV1Store {
+    NotStore {
         path: String,
         detail: String,
         format: i64,
     },
-    #[error("task not found: {0}")]
-    TaskNotFound(String),
+    #[error("no entry matches {0:?}: use its ref (like a7b3) or part of its title")]
+    EntryNotFound(String),
     #[error(
-        "task {id} changed since it was read (expected revision {expected}, found {found}); re-read the task and retry"
+        "entry {entry_ref} changed since it was read (expected revision {expected}, found {found}); re-read it and retry"
     )]
     StaleRevision {
-        id: String,
+        entry_ref: String,
         expected: String,
         found: String,
     },
-    #[error("task title cannot be empty")]
+    #[error("title cannot be empty")]
     EmptyTitle,
-    /// The request or command line itself is wrong (bad batch intent, a guard
-    /// that needs a flag). Distinct from a store failure, so a caller can fix
-    /// its input rather than retry.
+    #[error("could not find a free ref after {0} attempts")]
+    RefCollisions(u32),
+    #[error("blocking {blocked} would make a loop: {path}")]
+    WouldCycle { blocked: String, path: String },
+    /// The request or command line itself is wrong. Distinct from a store
+    /// failure, so a caller can fix its input rather than retry.
     #[error("{0}")]
     InvalidInput(String),
-    #[error("could not allocate a unique alias after {0} attempts")]
-    AliasCollisions(u32),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("parse {what}: {err}")]
     Parse { what: String, err: String },
     #[error("{0}")]
     Id(#[from] IdError),
+    /// A bad value in the request itself, such as `--state active`.
+    #[error(transparent)]
+    Model(#[from] crate::model::ModelError),
     #[error("{0}")]
     Msg(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Satisfies the bound that lets `?` convert a store failure into a report.
+/// Satisfies the bound that lets `?` turn a store failure into a report.
 ///
-/// Deliberately no `code()`: miette would print the machine kind in front of the
+/// Deliberately no `code()`: miette prints whatever that returns in front of the
 /// message a human reads. The kind is recovered from the error's type in
 /// `cli::run` and appears only in the JSON envelope.
 impl miette::Diagnostic for StoreError {}
@@ -88,11 +88,14 @@ impl StoreError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::TasksNotFound(_) | Self::ExplicitStoreMissing { .. } => code::STORE_NOT_FOUND,
-            Self::NotV1Store { .. } => code::NOT_A_V1_STORE,
-            Self::TaskNotFound(_) => code::NOT_FOUND,
+            Self::NotStore { .. } => code::NOT_A_STORE,
+            Self::EntryNotFound(_) => code::NOT_FOUND,
             Self::StaleRevision { .. } => code::STALE_REVISION,
-            Self::EmptyTitle | Self::AliasCollisions(_) => code::INVALID_INPUT,
-            Self::InvalidInput(_) => code::INVALID_INPUT,
+            Self::EmptyTitle
+            | Self::RefCollisions(_)
+            | Self::WouldCycle { .. }
+            | Self::InvalidInput(_) => code::INVALID_INPUT,
+            Self::Model(_) => code::INVALID_INPUT,
             Self::Io(_) => code::IO,
             Self::Parse { .. } => code::PARSE,
             Self::Id(IdError::NotFound(_)) => code::NOT_FOUND,
@@ -103,7 +106,7 @@ impl StoreError {
     }
 }
 
-fn parse_err(what: impl Into<String>, err: impl ToString) -> StoreError {
+pub fn parse_err(what: impl Into<String>, err: impl ToString) -> StoreError {
     StoreError::Parse {
         what: what.into(),
         err: err.to_string(),
@@ -115,9 +118,10 @@ fn parse_err(what: impl Into<String>, err: impl ToString) -> StoreError {
 // ---------------------------------------------------------------------------
 
 pub const TASKS_DIR: &str = ".tasks";
-const STORE_FILE: &str = "store.json";
-const LEGACY_CONFIG_FILE: &str = "config.json";
-const RECORDS_DIR: &str = "records";
+/// The store file: format version, plus aliases for `-C`.
+pub const STORE_FILE: &str = ".tk.json";
+/// The layout this binary reads and writes. One JSON document per entry.
+pub const FORMAT: i64 = 3;
 const LOCK_FILE: &str = ".lock";
 
 /// Environment variable naming the task store directory (see `--tasks-dir`).
@@ -202,7 +206,7 @@ impl Ctx {
         };
         let cwd = Self::absolutize(&cwd)?;
         let mut ctx = Self::walk(&cwd);
-        // Resolve `-C` against directory aliases (mirrors the Go behavior).
+        // Resolve `-C` against directory aliases.
         if let Some(d) = dir
             && let Some(alias_target) = ctx.read_alias(d)
         {
@@ -322,20 +326,13 @@ impl Ctx {
         self.tasks_dir.join(STORE_FILE)
     }
 
-    pub fn legacy_config_path(&self) -> PathBuf {
-        self.tasks_dir.join(LEGACY_CONFIG_FILE)
-    }
-
-    pub fn records_dir(&self) -> PathBuf {
-        self.tasks_dir.join(RECORDS_DIR)
-    }
-
-    pub fn record_path(&self, id: &str) -> PathBuf {
-        self.records_dir().join(format!("{id}.jsonl"))
-    }
-
     pub fn lock_path(&self) -> PathBuf {
         self.tasks_dir.join(LOCK_FILE)
+    }
+
+    /// `<ref>-<slug>.json`, or `<ref>.json` when there is no slug.
+    pub fn entry_path(&self, r#ref: &str, slug: &str) -> PathBuf {
+        self.tasks_dir.join(ids::file_name_of(r#ref, slug))
     }
 
     /// Build a context for an already-resolved store directory (no discovery).
@@ -359,11 +356,12 @@ impl Ctx {
 
     /// Require an existing store this binary can read.
     ///
-    /// Every read and write path goes through here, so a legacy store is
-    /// refused with an explanation instead of being read as empty and then
-    /// written over.
+    /// Every read and write path goes through here, so an older store is refused
+    /// with an explanation instead of being read as empty and then written over.
     pub fn require(&self) -> Result<()> {
-        if !self.exists {
+        // Checked live rather than from the cached `exists`: a store created
+        // during this process (by `tk init`, or by a test) is still readable.
+        if !self.tasks_dir.is_dir() {
             return Err(self.missing_store_error());
         }
         self.check_format()
@@ -381,64 +379,69 @@ impl Ctx {
         self.check_format()
     }
 
-    /// Refuse anything that is not a `format: 2` store, naming the reason.
+    /// Refuse anything that is not a `format: 3` store, naming the reason.
     pub fn check_format(&self) -> Result<()> {
         match fs::read(self.store_path()) {
             Ok(data) => match serde_json::from_slice::<Config>(&data) {
-                Ok(config) if config.format == model::FORMAT => Ok(()),
-                Ok(config) => Err(self.not_v1(format!(
-                    "store.json declares format {}, but this binary writes format {}",
-                    config.format,
-                    model::FORMAT
+                Ok(config) if config.format == FORMAT => Ok(()),
+                Ok(config) => Err(self.not_store(format!(
+                    "{STORE_FILE} declares format {}, but this binary writes format {FORMAT}",
+                    config.format
                 ))),
-                Err(e) => Err(self.not_v1(format!("store.json could not be parsed: {e}"))),
+                Err(e) => Err(self.not_store(format!("{STORE_FILE} could not be parsed: {e}"))),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(self.not_v1(self.describe_non_v1()))
+                Err(self.not_store(self.describe_non_store()))
             }
             Err(e) => Err(StoreError::Io(e)),
         }
     }
 
-    fn not_v1(&self, detail: String) -> StoreError {
-        StoreError::NotV1Store {
+    fn not_store(&self, detail: String) -> StoreError {
+        StoreError::NotStore {
             path: self.tasks_dir.display().to_string(),
             detail,
-            format: model::FORMAT,
+            format: FORMAT,
         }
     }
 
-    /// Why this directory is not a v1 store, said specifically.
-    fn describe_non_v1(&self) -> String {
-        if self.legacy_config_path().exists() {
-            return format!(
-                "found {LEGACY_CONFIG_FILE}, the configuration file of the previous layout \
-                 (one JSON file per task at the top level)"
-            );
+    /// Why this directory is not a format-3 store, said specifically enough to
+    /// tell a human which migration to run.
+    fn describe_non_store(&self) -> String {
+        if self.tasks_dir.join("store.json").exists() {
+            return "found store.json and records/, the v1 layout (an appended event log)"
+                .to_owned();
         }
-        let strays = self.top_level_task_files();
+        if self.tasks_dir.join("config.json").exists() {
+            return "found config.json, the v0 layout (one JSON file per task, keyed by project)"
+                .to_owned();
+        }
+        let strays = self.unrecognized_json();
         if !strays.is_empty() {
             let mut shown: Vec<String> = strays.iter().take(3).cloned().collect();
             if strays.len() > 3 {
                 shown.push(format!("and {} more", strays.len() - 3));
             }
             return format!(
-                "found task files from the previous layout at the top level: {}",
+                "found .json files whose names are not entry names (<ref>-<slug>.json): {}",
                 shown.join(", ")
             );
         }
         format!("{STORE_FILE} is missing")
     }
 
-    /// Top-level `*.json` files other than `store.json`.
-    fn top_level_task_files(&self) -> Vec<String> {
+    /// `.json` files in the store that are not `.tk.json` and not entry names.
+    fn unrecognized_json(&self) -> Vec<String> {
         let mut out = Vec::new();
         let Ok(entries) = fs::read_dir(&self.tasks_dir) else {
             return out;
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".json") && name != STORE_FILE && entry.path().is_file() {
+            if !name.ends_with(".json") || name == STORE_FILE || !entry.path().is_file() {
+                continue;
+            }
+            if ids::parse_file_name(&name).is_none() {
                 out.push(name);
             }
         }
@@ -451,31 +454,26 @@ impl Ctx {
     pub fn load_config(&self) -> Result<Config> {
         self.require()?;
         let data = fs::read(self.store_path()).map_err(StoreError::Io)?;
-        let mut config: Config = serde_json::from_slice(&data)
-            .map_err(|e| self.not_v1(format!("store.json could not be parsed: {e}")))?;
-        if config.project.is_empty() {
-            config.project = "tk".to_owned();
-        }
-        Ok(config)
+        serde_json::from_slice(&data)
+            .map_err(|e| self.not_store(format!("{STORE_FILE} could not be parsed: {e}")))
     }
 
     fn write_config(&self, config: &Config) -> Result<()> {
-        let data =
-            serde_json::to_string_pretty(config).map_err(|e| parse_err("marshal store.json", e))?;
-        atomic_write(&self.store_path(), data.as_bytes())
+        let data = serde_json::to_string_pretty(config).map_err(|e| parse_err(STORE_FILE, e))?;
+        atomic_write(&self.store_path(), format!("{data}\n").as_bytes())
     }
 
     // -- entry points ------------------------------------------------------
 
-    /// Read side plus lock-free appends.
+    /// Reads only.
     pub fn store(&self) -> Result<Store<'_>> {
         self.require()?;
         Ok(Store { ctx: self })
     }
 
-    /// Mutation boundary for operations that must see a consistent store.
+    /// Reads and writes, under the store lock.
     ///
-    /// Do not open two transactions against one store in a process: the
+    /// Do not open two transactions against one store in one process: the
     /// advisory lock is not reentrant across file handles.
     pub fn txn(&self) -> Result<Txn<'_>> {
         self.require()?;
@@ -490,12 +488,15 @@ impl Ctx {
     pub fn txn_init(&self) -> Result<Txn<'_>> {
         fs::create_dir_all(&self.tasks_dir).map_err(StoreError::Io)?;
         ensure_gitignore(&self.tasks_dir);
-        fs::create_dir_all(self.records_dir()).map_err(StoreError::Io)?;
         let lock = self.lock_mutation()?;
-        Ok(Txn {
+        let txn = Txn {
             store: Store { ctx: self },
             _lock: lock,
-        })
+        };
+        if !self.store_path().exists() {
+            self.write_config(&Config::default())?;
+        }
+        Ok(txn)
     }
 
     /// Acquire just this store's mutation lock, without a transaction.
@@ -515,17 +516,6 @@ impl Ctx {
         file.lock().map_err(StoreError::Io)?;
         Ok(StoreLock { file })
     }
-
-    /// Write `store.json` for a new store.
-    fn init_config(&self, config: &Config) -> Result<()> {
-        if self.store_path().exists() {
-            return Err(StoreError::Msg(format!(
-                "task store already initialized at {}",
-                self.tasks_dir.display()
-            )));
-        }
-        self.write_config(config)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,10 +524,11 @@ impl Ctx {
 
 /// Advisory exclusive lock over one store's mutation boundary.
 ///
-/// Serializes cooperating `tk` processes for operations that read other records
-/// or read-then-write one record. It does not constrain editors, a Git
-/// checkout, or an older `tk` binary, and it cannot coordinate separate clones
-/// or machines.
+/// Serializes cooperating `tk` processes, which matters more than it did in v1:
+/// a mutation rewrites a whole file, so two writers that both read before either
+/// wrote can lose one of the changes. It does not constrain editors, a Git
+/// checkout, or an older `tk` binary, and it cannot coordinate separate clones or
+/// machines.
 pub struct StoreLock {
     file: fs::File,
 }
@@ -549,85 +540,86 @@ impl Drop for StoreLock {
 }
 
 // ---------------------------------------------------------------------------
-// Store: reads and lock-free appends
+// Store: reads
 // ---------------------------------------------------------------------------
 
-/// Read and lock-free-append operations on a store.
+/// Read operations on a store. Constructed only through [`Ctx::store`].
 pub struct Store<'a> {
     ctx: &'a Ctx,
 }
 
-/// Everything a fold needs, plus the problems found while reading.
+/// What a scan found, problems included.
 #[derive(Debug, Default)]
-pub struct Snapshot {
-    pub records: Vec<Record>,
-    /// Record-level problems (unreadable files, bad names, duplicate aliases).
-    /// Per-record line damage stays on the [`Record`].
+pub struct Scan {
+    /// Entry files that parsed, with the path each came from.
+    pub entries: Vec<(PathBuf, Entry)>,
+    /// Files that are not readable entries: unparseable JSON, an entry name whose
+    /// ref disagrees with its content, a duplicate ref, a stray `.json`.
     pub issues: Vec<String>,
 }
 
-impl Snapshot {
-    /// Alias and status for every record, so references render as handles.
-    pub fn index(&self) -> Index {
-        Index::from_records(&self.records)
-    }
+/// List filter. Defaults to open entries, oldest first.
+#[derive(Debug, Default, Clone)]
+pub struct Filter {
+    /// Case-insensitive substring of the title, a label, or the status.
+    pub search: String,
+    /// An exact state; overrides `include_closed`.
+    pub state: Option<State>,
+    pub label: String,
+    /// `Some(true)` blocked only, `Some(false)` unblocked only.
+    pub blocked: Option<bool>,
+    /// Open and unblocked: what can be started now.
+    pub ready: bool,
+    /// Include done and dropped entries.
+    pub include_closed: bool,
+    pub limit: usize,
 }
 
-/// What enrichment needs to describe a *referenced* task.
-#[derive(Debug, Default)]
-pub struct Index {
-    entries: HashMap<String, Entry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Entry {
-    pub alias: String,
-    pub status: Status,
-}
-
-impl Index {
-    pub fn from_records(records: &[Record]) -> Self {
-        Self {
-            entries: records
+impl Filter {
+    fn matches(&self, view: &EntryView) -> bool {
+        let entry = &view.entry;
+        match self.state {
+            Some(state) if entry.state != state => return false,
+            Some(_) => {}
+            None if !self.include_closed && !self.ready && entry.state.is_closed() => return false,
+            None => {}
+        }
+        if self.ready && !view.is_ready() {
+            return false;
+        }
+        if let Some(blocked) = self.blocked
+            && view.is_waiting() != blocked
+        {
+            return false;
+        }
+        if !self.label.is_empty()
+            && !entry
+                .labels
                 .iter()
-                .map(|r| {
-                    (
-                        r.id.clone(),
-                        Entry {
-                            alias: r.state.alias.clone(),
-                            status: r.state.status,
-                        },
-                    )
-                })
-                .collect(),
+                .any(|l| l.eq_ignore_ascii_case(&self.label))
+        {
+            return false;
         }
-    }
-
-    /// Look up a referenced task, reading its record when the index is cold.
-    ///
-    /// A single-task view should not pay for a whole-store scan, and a list
-    /// should not re-read every blocker it already has in memory.
-    fn lookup(&self, ctx: &Ctx, id: &str) -> Option<Entry> {
-        if let Some(entry) = self.entries.get(id) {
-            return Some(entry.clone());
+        if !self.search.is_empty() {
+            let needle = self.search.to_lowercase();
+            let hit = entry.title.to_lowercase().contains(&needle)
+                || entry
+                    .labels
+                    .iter()
+                    .any(|l| l.to_lowercase().contains(&needle))
+                || entry
+                    .status
+                    .as_deref()
+                    .is_some_and(|s| s.to_lowercase().contains(&needle));
+            if !hit {
+                return false;
+            }
         }
-        let record = record::read(&ctx.record_path(id)).ok()?;
-        Some(Entry {
-            alias: record.state.alias.clone(),
-            status: record.state.status,
-        })
+        true
     }
 }
 
 impl<'a> Store<'a> {
-    /// A handle over an already-validated context.
-    ///
-    /// [`Ctx::store`] and [`Ctx::txn`] apply the format gate; this does not, so
-    /// it is for callers that already hold a `Store` or `Txn`.
-    pub fn new(ctx: &'a Ctx) -> Self {
-        Self { ctx }
-    }
-
     pub fn ctx(&self) -> &'a Ctx {
         self.ctx
     }
@@ -636,178 +628,237 @@ impl<'a> Store<'a> {
         self.ctx.load_config()
     }
 
-    /// Identities of every record, for reference resolution.
-    pub fn identities(&self) -> Result<Vec<ids::Known>> {
-        let mut out = Vec::new();
-        let entries = match fs::read_dir(self.ctx.records_dir()) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+    /// Read every entry file. Unreadable files become issues, never silence.
+    pub fn scan(&self) -> Result<Scan> {
+        let mut scan = Scan::default();
+        let dir = fs::read_dir(&self.ctx.tasks_dir);
+        let dir = match dir {
+            Ok(dir) => dir,
+            // An undiscovered store has nothing to show rather than an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(scan),
             Err(e) => return Err(StoreError::Io(e)),
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(id) = name.strip_suffix(".jsonl") else {
-                continue;
-            };
-            if !ids::is_valid_id(id) {
+
+        let mut seen: HashMap<String, PathBuf> = HashMap::new();
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
                 continue;
             }
-            let identity = record::read_identity(&entry.path()).unwrap_or_default();
-            out.push(ids::Known {
-                id: id.to_owned(),
-                alias: identity.alias,
-                legacy_aliases: identity.legacy_aliases,
-            });
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".json") {
+                continue;
+            }
+            if ids::parse_file_name(&name).is_none() {
+                if name != STORE_FILE {
+                    scan.issues.push(format!(
+                        "{name}: not an entry name (expected <ref>-<slug>.json)"
+                    ));
+                }
+                continue;
+            }
+            paths.push(path);
         }
-        out.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(out)
+        paths.sort();
+
+        for path in paths {
+            let name = file_name(&path);
+            let data = match fs::read(&path) {
+                Ok(data) => data,
+                Err(e) => {
+                    scan.issues.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let entry: Entry = match serde_json::from_slice(&data) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    scan.issues.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let named = ids::parse_file_name(&name).expect("filtered above");
+            if !ids::is_valid_ref(&entry.r#ref) {
+                scan.issues.push(format!(
+                    "{name}: ref {:?} is not four characters from the tk alphabet",
+                    entry.r#ref
+                ));
+            } else if entry.r#ref != named.r#ref {
+                scan.issues.push(format!(
+                    "{name}: file name says {} but the document says {}",
+                    named.r#ref, entry.r#ref
+                ));
+            }
+            if let Some(previous) = seen.insert(entry.r#ref.clone(), path.clone()) {
+                scan.issues.push(format!(
+                    "ref {} appears twice: {} and {name}",
+                    entry.r#ref,
+                    file_name(&previous)
+                ));
+            }
+            if entry.title.trim().is_empty() {
+                scan.issues.push(format!("{name}: title is empty"));
+            }
+            scan.entries.push((path, entry));
+        }
+        Ok(scan)
     }
 
-    /// Resolve an alias, exact ID, or unique ID prefix.
+    /// What the resolver needs: ref, slug, and title for every entry.
+    pub fn known(&self) -> Result<Vec<Known>> {
+        Ok(self
+            .scan()?
+            .entries
+            .into_iter()
+            .map(|(path, entry)| Known {
+                r#ref: entry.r#ref,
+                slug: ids::parse_file_name(&file_name(&path))
+                    .map(|k| k.slug)
+                    .unwrap_or_default(),
+                title: entry.title,
+                state: entry.state,
+            })
+            .collect())
+    }
+
+    /// Resolve a ref or part of a title to exactly one ref.
     pub fn resolve(&self, input: &str) -> Result<String> {
-        Ok(ids::resolve(&self.identities()?, input)?)
+        Ok(ids::resolve(&self.known()?, input)?)
     }
 
-    /// A task's alias, for rendering a reference the way it was typed.
-    pub fn alias_of(&self, id: &str) -> Option<String> {
-        record::read_identity(&self.ctx.record_path(id))
-            .ok()
-            .map(|identity| identity.alias)
+    /// Load one entry by ref.
+    pub fn load(&self, r#ref: &str) -> Result<(PathBuf, Entry)> {
+        let scan = self.scan()?;
+        scan.entries
+            .into_iter()
+            .find(|(_, entry)| entry.r#ref == r#ref)
+            .ok_or_else(|| StoreError::EntryNotFound(r#ref.to_owned()))
     }
 
-    pub fn load(&self, id: &str) -> Result<Record> {
-        if !ids::is_valid_id(id) {
-            return Err(StoreError::TaskNotFound(id.to_owned()));
-        }
-        record::read(&self.ctx.record_path(id))
+    /// Resolve and load, with the computed view.
+    pub fn get(&self, input: &str) -> Result<EntryView> {
+        let known = self.known()?;
+        let r#ref = ids::resolve(&known, input)?;
+        let (path, entry) = self.load_only(&r#ref)?;
+        Ok(view_of(&entry, &file_name(&path), &known))
     }
 
-    pub fn snapshot(&self) -> Result<Snapshot> {
-        let mut out = Snapshot::default();
-        let entries = match fs::read_dir(self.ctx.records_dir()) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                out.issues
-                    .push(format!("{} is missing", self.ctx.records_dir().display()));
-                return Ok(out);
-            }
-            Err(e) => return Err(StoreError::Io(e)),
-        };
-        for entry in entries.flatten() {
-            if !entry.path().is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(id) = name.strip_suffix(".jsonl") else {
-                out.issues
-                    .push(format!("unexpected file in records/: {name}"));
-                continue;
-            };
-            if !ids::is_valid_id(id) {
-                out.issues
-                    .push(format!("record file {name} is not named after a task ID"));
-                continue;
-            }
-            match record::read(&entry.path()) {
-                Ok(record) => out.records.push(record),
-                Err(e) => out.issues.push(format!("record {id} is unreadable: {e}")),
-            }
-        }
-        out.records.sort_by(|a, b| {
-            a.state
-                .created_at
-                .cmp(&b.state.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        out.issues.extend(duplicate_aliases(&out.records));
-        Ok(out)
+    fn load_only(&self, r#ref: &str) -> Result<(PathBuf, Entry)> {
+        self.load(r#ref)
     }
 
-    /// Append an event without taking the lock. Valid only for operations that
-    /// are last-writer-wins or commutative; do not use it to replace a value
-    /// that was read first.
-    pub fn append(&self, id: &str, op_name: &str, data: Value) -> Result<()> {
-        let path = self.ctx.record_path(id);
-        if !path.is_file() {
-            return Err(StoreError::TaskNotFound(id.to_owned()));
-        }
-        record::append(&path, &Event::new(op_name, data))
-    }
-
-    /// Append and return the folded result, reading the record back so the
-    /// caller sees exactly what landed.
-    pub fn append_and_view(&self, id: &str, op_name: &str, data: Value) -> Result<TaskView> {
-        self.append(id, op_name, data)?;
-        self.view_of(id)
-    }
-
-    /// Read one task into its computed view.
-    pub fn view_of(&self, id: &str) -> Result<TaskView> {
-        let record = self.load(id)?;
-        Ok(self.view(&record, &Index::default()))
-    }
-
-    /// Reject an operation unless the record still carries `expected`.
+    /// Every entry matching `filter`, oldest first, with the scan's issues.
     ///
-    /// Only meaningful while the store lock is held: without it the record can
-    /// change between this check and the write that follows.
-    pub fn check_rev(&self, id: &str, expected: Option<&str>) -> Result<()> {
+    /// The whole store is read and folded on every call: measured at 20ms for
+    /// 161 entries, so there is no index and nothing to keep in sync.
+    pub fn list(&self, filter: &Filter) -> Result<(Vec<EntryView>, Vec<String>)> {
+        let scan = self.scan()?;
+        let known: Vec<Known> = scan
+            .entries
+            .iter()
+            .map(|(path, entry)| Known {
+                r#ref: entry.r#ref.clone(),
+                slug: ids::parse_file_name(&file_name(path))
+                    .map(|k| k.slug)
+                    .unwrap_or_default(),
+                title: entry.title.clone(),
+                state: entry.state,
+            })
+            .collect();
+
+        let mut views: Vec<EntryView> = scan
+            .entries
+            .iter()
+            .map(|(path, entry)| view_of(entry, &file_name(path), &known))
+            .filter(|view| filter.matches(view))
+            .collect();
+        views.sort_by(|a, b| {
+            a.entry
+                .created
+                .cmp(&b.entry.created)
+                .then_with(|| a.entry.r#ref.cmp(&b.entry.r#ref))
+        });
+        if filter.limit > 0 {
+            views.truncate(filter.limit);
+        }
+        Ok((views, scan.issues))
+    }
+
+    /// Fingerprint of an entry as it is now on disk.
+    pub fn rev_of(&self, r#ref: &str) -> Result<String> {
+        Ok(fingerprint(&self.load(r#ref)?.1))
+    }
+
+    /// Refuse a write when the entry changed since it was read.
+    pub fn check_rev(&self, r#ref: &str, expected: Option<&str>) -> Result<()> {
         let Some(expected) = expected else {
             return Ok(());
         };
-        let found = self.load(id)?.rev();
+        let found = self.rev_of(r#ref)?;
         if found != expected {
             return Err(StoreError::StaleRevision {
-                id: id.to_owned(),
+                entry_ref: r#ref.to_owned(),
                 expected: expected.to_owned(),
                 found,
             });
         }
         Ok(())
     }
+}
 
-    pub fn view(&self, record: &Record, index: &Index) -> TaskView {
-        enrich(self.ctx, record, index)
+/// Build the reader's view of an entry. Pure: no filesystem access.
+pub fn view_of(entry: &Entry, file: &str, known: &[Known]) -> EntryView {
+    let by_ref: HashMap<&str, &Known> = known.iter().map(|k| (k.r#ref.as_str(), k)).collect();
+    let mut unresolved_blockers = Vec::new();
+    let mut blocking = Vec::new();
+    for blocker in &entry.blocked_by {
+        match by_ref.get(blocker.as_str()) {
+            // Not in the store: counts as blocking, never as done.
+            None => {
+                unresolved_blockers.push(blocker.clone());
+                blocking.push(blocker.clone());
+            }
+            Some(known) if known.state == State::Open => blocking.push(blocker.clone()),
+            Some(_) => {}
+        }
     }
-
-    pub fn list(&self, opts: &ListOptions) -> Result<Vec<TaskView>> {
-        if !self.ctx.tasks_dir.is_dir() {
-            self.ctx.require_for_read()?;
-            return Ok(Vec::new());
-        }
-        let snapshot = self.snapshot()?;
-        let index = snapshot.index();
-        let mut filtered: Vec<&Record> = snapshot
-            .records
-            .iter()
-            .filter(|r| matches_list(r, opts))
-            .collect();
-        filtered.sort_by(|a, b| compare_records(&a.state, &b.state));
-        if opts.limit > 0 && filtered.len() > opts.limit {
-            filtered.truncate(opts.limit);
-        }
-        Ok(filtered
-            .into_iter()
-            .map(|r| enrich(self.ctx, r, &index))
-            .collect())
+    EntryView {
+        entry: entry.clone(),
+        rev: fingerprint(entry),
+        unresolved_blockers,
+        blocking,
+        file: file.to_owned(),
     }
 }
 
+/// Content fingerprint for `--if-rev`.
+///
+/// FNV-1a over the canonical serialization of the parsed document, so it is
+/// stable for the same content regardless of key order on disk, and it changes
+/// when any field does. It is not a cryptographic hash and carries no
+/// compatibility promise across versions: both sides of the comparison are the
+/// same binary.
+pub fn fingerprint(entry: &Entry) -> String {
+    // Serializing this type cannot fail: every string is UTF-8 and no map key is
+    // anything but a string.
+    let canonical = serde_json::to_vec(entry).unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 // ---------------------------------------------------------------------------
-// Txn: everything that needs a consistent view
+// Txn: the only writer
 // ---------------------------------------------------------------------------
 
-/// A mutation operation holding the store lock until dropped.
+/// Read-write operations on a store, holding the mutation lock.
 pub struct Txn<'a> {
     store: Store<'a>,
     _lock: StoreLock,
-}
-
-impl<'a> std::ops::Deref for Txn<'a> {
-    type Target = Store<'a>;
-    fn deref(&self) -> &Self::Target {
-        &self.store
-    }
 }
 
 impl<'a> Txn<'a> {
@@ -815,786 +866,239 @@ impl<'a> Txn<'a> {
         &self.store
     }
 
-    // -- config ------------------------------------------------------------
+    pub fn ctx(&self) -> &'a Ctx {
+        self.store.ctx
+    }
 
+    pub fn config(&self) -> Result<Config> {
+        self.store.config()
+    }
+
+    pub fn known(&self) -> Result<Vec<Known>> {
+        self.store.known()
+    }
+
+    pub fn resolve(&self, input: &str) -> Result<String> {
+        self.store.resolve(input)
+    }
+
+    pub fn load(&self, r#ref: &str) -> Result<(PathBuf, Entry)> {
+        self.store.load(r#ref)
+    }
+
+    /// Replace `.tk.json`.
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) -> Result<Config> {
         let mut config = self.store.config()?;
         f(&mut config);
-        self.store.ctx.write_config(&config)?;
+        let data = serde_json::to_string_pretty(&config).map_err(|e| parse_err(STORE_FILE, e))?;
+        atomic_write(&self.ctx().store_path(), format!("{data}\n").as_bytes())?;
         Ok(config)
     }
 
-    pub fn init_store(&self, config: &Config) -> Result<()> {
-        let _ = &self._lock;
-        self.store.ctx.init_config(config)
+    /// Mark the moment of a change. Every write should call this first.
+    pub fn touch(entry: &mut Entry, now: &str) {
+        entry.updated = now.to_owned();
     }
 
-    // -- create ------------------------------------------------------------
+    /// Write one entry, keeping the file it came from when the name changed.
+    ///
+    /// `previous` is the path the entry was read from, if any: the slug lives in
+    /// the filename, so preserving it means reading it back rather than
+    /// re-deriving it from a title that may have changed.
+    pub fn write(&self, entry: &Entry, previous: Option<&Path>) -> Result<PathBuf> {
+        let slug = match previous.and_then(|p| ids::parse_file_name(&file_name(p))) {
+            Some(named) => named.slug,
+            None => ids::slug(&entry.title),
+        };
+        self.write_as(entry, &slug, previous)
+    }
 
-    /// Create a task. Locked, because alias uniqueness is a store-wide
-    /// invariant and two concurrent `add`s must not pick the same alias.
-    pub fn create(&self, opts: CreateOptions) -> Result<TaskView> {
-        let title = opts.title.trim().to_owned();
+    /// Write one entry under an explicit slug.
+    pub fn write_as(&self, entry: &Entry, slug: &str, previous: Option<&Path>) -> Result<PathBuf> {
+        let path = self.ctx().entry_path(&entry.r#ref, slug);
+        let data = serde_json::to_string_pretty(entry).map_err(|e| parse_err("entry", e))?;
+        atomic_write(&path, format!("{data}\n").as_bytes())?;
+        // After the new file exists, never before: a crash between the two
+        // leaves two files sharing one ref, which `tk check` reports, rather
+        // than no file at all.
+        if let Some(old) = previous
+            && old != path
+            && old.exists()
+        {
+            fs::remove_file(old).map_err(StoreError::Io)?;
+        }
+        Ok(path)
+    }
+
+    /// Create an entry: allocate a free ref, derive the slug, write the file.
+    pub fn create(&self, title: &str, now: &str) -> Result<EntryView> {
+        let title = title.trim();
         if title.is_empty() {
             return Err(StoreError::EmptyTitle);
         }
-        let config = self.store.config()?;
-        let project = opts.project.unwrap_or_else(|| config.project.clone());
-        ids::validate_project(&project)?;
-
-        if let Some(parent) = &opts.parent {
-            self.require_task(parent)?;
-        }
-        let known = self.store.identities()?;
-        let now = timeutil::now_rfc3339_nano();
-        for _ in 0..32u32 {
-            let alias = ids::new_alias();
-            if known
-                .iter()
-                .any(|k| k.alias == alias || k.legacy_aliases.contains(&alias))
-            {
-                continue;
-            }
-            let id = ids::new_id();
-            let path = self.store.ctx.record_path(&id);
-            if path.exists() {
-                continue;
-            }
-            let state = TaskState {
-                id: id.clone(),
-                alias,
-                legacy_aliases: Vec::new(),
-                project: project.clone(),
-                title: title.clone(),
-                description: opts.description.clone(),
-                status: Status::Open,
-                priority: opts.priority.unwrap_or(config.defaults.priority),
-                labels: opts
-                    .labels
-                    .clone()
-                    .unwrap_or_else(|| config.defaults.labels.clone()),
-                parent: opts.parent.clone(),
-                blocked_by: Vec::new(),
-                logs: Vec::new(),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                completed_at: None,
-                archived_at: None,
-                checkpoint: None,
-                links: Vec::new(),
-                acceptance: Vec::new(),
-                evidence: Vec::new(),
-            };
-            let data =
-                serde_json::to_value(&state).map_err(|e| parse_err("marshal new task", e))?;
-            // `append` creates the file exclusively enough for our purposes:
-            // the ID is freshly generated and 80 bits of randomness wide.
-            record::append(&path, &Event::new(op::CREATED, data))?;
-            return self.store.view_of(&id);
-        }
-        Err(StoreError::AliasCollisions(32))
+        let known = self.known()?;
+        let r#ref = self.free_ref(&known)?;
+        let entry = Entry::new(r#ref, title.to_owned(), now.to_owned());
+        let slug = ids::slug(&entry.title);
+        let path = self.write_as(&entry, &slug, None)?;
+        Ok(view_of(&entry, &file_name(&path), &known))
     }
 
-    // -- conditional writes ------------------------------------------------
-
-    /// Append unless the record no longer has the revision the caller saw.
-    ///
-    /// The read, the comparison, and the append happen under one lock, which
-    /// is what makes `--if-rev` meaningful rather than decorative.
-    pub fn append_if_rev(
-        &self,
-        id: &str,
-        op_name: &str,
-        data: Value,
-        expect_rev: Option<&str>,
-    ) -> Result<TaskView> {
-        self.store.check_rev(id, expect_rev)?;
-        self.store.append(id, op_name, data)?;
-        self.store.view_of(id)
+    /// Delete an entry file, returning the path it lived at.
+    pub fn delete(&self, r#ref: &str) -> Result<PathBuf> {
+        let (path, _) = self.load(r#ref)?;
+        fs::remove_file(&path).map_err(StoreError::Io)?;
+        Ok(path)
     }
 
-    /// Replace or clear a value, then report the result.
-    pub fn set_field(
-        &self,
-        id: &str,
-        op_name: &str,
-        data: Value,
-        expect_rev: Option<&str>,
-    ) -> Result<TaskView> {
-        self.append_if_rev(id, op_name, data, expect_rev)
-    }
-
-    // -- graph -------------------------------------------------------------
-
-    pub fn add_blocker(&self, id: &str, blocker: &str) -> Result<TaskView> {
-        if id == blocker {
-            return Err(StoreError::InvalidInput("task cannot block itself".into()));
-        }
-        self.require_task(blocker)?;
-        if would_block_cycle(&self.store, id, blocker)? {
-            return Err(StoreError::InvalidInput(format!(
-                "would create circular dependency: {id} is already blocked by {blocker} transitively"
-            )));
-        }
-        self.store
-            .append_and_view(id, op::BLOCK_ADD, serde_json::json!([blocker]))
-    }
-
-    pub fn remove_blocker(&self, id: &str, blocker: &str) -> Result<(TaskView, bool)> {
-        let record = self.store.load(id)?;
-        let found = record.state.blocked_by.iter().any(|b| b == blocker);
-        if found {
-            self.store
-                .append(id, op::BLOCK_REMOVE, serde_json::json!([blocker]))?;
-        }
-        Ok((self.store.view_of(id)?, found))
-    }
-
-    /// Set or clear the parent, validating existence and acyclicity.
-    pub fn set_parent(&self, id: &str, parent: Option<&str>) -> Result<TaskView> {
-        match parent {
-            None => self
-                .store
-                .append_and_view(id, op::PARENT_CLEAR, Value::Null),
-            Some(parent) => {
-                if parent == id {
-                    return Err(StoreError::Msg("task cannot be its own parent".into()));
-                }
-                self.require_task(parent)?;
-                if would_parent_cycle(&self.store, id, parent)? {
-                    return Err(StoreError::Msg(
-                        "would create circular parent relationship".into(),
-                    ));
-                }
-                self.store
-                    .append_and_view(id, op::PARENT_SET, serde_json::json!(parent))
+    fn free_ref(&self, known: &[Known]) -> Result<String> {
+        for _ in 0..100 {
+            let candidate = ids::new_ref();
+            if !known.iter().any(|k| k.r#ref == candidate) {
+                return Ok(candidate);
             }
         }
+        Err(StoreError::RefCollisions(100))
     }
-
-    fn require_task(&self, id: &str) -> Result<()> {
-        if self.store.ctx.record_path(id).is_file() {
-            Ok(())
-        } else {
-            Err(StoreError::TaskNotFound(id.to_owned()))
-        }
-    }
-
-    // -- project rename ----------------------------------------------------
-
-    /// Change every task's display project. Identity is untouched, so no
-    /// references need rewriting — that is the point of ULID IDs.
-    pub fn rename_project(&self, old: &str, new: &str) -> Result<RenameResult> {
-        ids::validate_project(new)?;
-        if old == new {
-            return Err(StoreError::Msg(format!(
-                "project {old:?} is already named that"
-            )));
-        }
-        let snapshot = self.store.snapshot()?;
-        let affected: Vec<&Record> = snapshot
-            .records
-            .iter()
-            .filter(|r| r.state.project == old)
-            .collect();
-        if affected.is_empty() {
-            return Err(StoreError::Msg(format!(
-                "no tasks found with project {old:?}"
-            )));
-        }
-        let mut renamed = Vec::new();
-        for record in &affected {
-            self.store
-                .append(&record.id, op::PROJECT, serde_json::json!(new))?;
-            renamed.push(record.id.clone());
-        }
-        let mut config = self.store.config()?;
-        if config.project == old {
-            config.project = new.to_owned();
-            self.store.ctx.write_config(&config)?;
-        }
-        Ok(RenameResult { renamed })
-    }
-
-    // -- deletion ----------------------------------------------------------
-
-    /// Delete a record. Refuses while other records still reference it unless
-    /// `scrub` is set; scrubbing rewrites those references, which is why this
-    /// operation needs the lock.
-    pub fn purge(&self, id: &str, scrub: bool) -> Result<PurgeOutcome> {
-        if !ids::is_valid_id(id) {
-            return Err(StoreError::TaskNotFound(id.to_owned()));
-        }
-        let snapshot = self.store.snapshot()?;
-        let mut referrers = Vec::new();
-        for record in &snapshot.records {
-            if record.id == id {
-                continue;
-            }
-            if record.state.blocked_by.iter().any(|b| b == id)
-                || record.state.parent.as_deref() == Some(id)
-            {
-                referrers.push(record.id.clone());
-            }
-        }
-        if !referrers.is_empty() && !scrub {
-            return Err(StoreError::Msg(format!(
-                "task {id} is referenced by {}; delete it anyway with --scrub, or keep the record",
-                referrers.join(", ")
-            )));
-        }
-        let mut references_scrubbed = 0usize;
-        for referrer in &referrers {
-            let record = self.store.load(referrer)?;
-            if record.state.blocked_by.iter().any(|b| b == id) {
-                self.store
-                    .append(referrer, op::BLOCK_REMOVE, serde_json::json!([id]))?;
-                references_scrubbed += 1;
-            }
-            if record.state.parent.as_deref() == Some(id) {
-                self.store.append(referrer, op::PARENT_CLEAR, Value::Null)?;
-                references_scrubbed += 1;
-            }
-        }
-        fs::remove_file(self.store.ctx.record_path(id)).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StoreError::TaskNotFound(id.to_owned())
-            } else {
-                StoreError::Io(e)
-            }
-        })?;
-        if let Some(parent) = self.store.ctx.records_dir().parent()
-            && let Ok(dir) = fs::File::open(parent)
-        {
-            let _ = dir.sync_all();
-        }
-        Ok(PurgeOutcome {
-            deleted: id.to_owned(),
-            references_scrubbed,
-            referrers,
-        })
-    }
-
-    // -- retention ---------------------------------------------------------
-
-    /// Retire old terminal tasks: archive by default, delete with `purge`.
-    pub fn clean(&self, days: i64, purge: bool) -> Result<CleanOutcome> {
-        if days < 0 {
-            return Err(StoreError::Msg(
-                "clean threshold must be non-negative".into(),
-            ));
-        }
-        let snapshot = self.store.snapshot()?;
-        let now = chrono::Utc::now();
-        let threshold = chrono::Duration::days(days);
-
-        let doomed: Vec<String> = snapshot
-            .records
-            .iter()
-            .filter(|r| {
-                r.state.status.is_terminal()
-                    && r.state
-                        .completed_at
-                        .as_deref()
-                        .and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok())
-                        .is_some_and(|c| {
-                            now.signed_duration_since(c.with_timezone(&chrono::Utc)) > threshold
-                        })
-            })
-            .map(|r| r.id.clone())
-            .collect();
-
-        let mut out = CleanOutcome::default();
-        if purge {
-            for id in &doomed {
-                let outcome = self.purge(id, true)?;
-                out.references_scrubbed += outcome.references_scrubbed;
-                out.purged += 1;
-            }
-        } else {
-            for record in &snapshot.records {
-                if !doomed.contains(&record.id) || record.state.is_archived() {
-                    continue;
-                }
-                self.store.append(&record.id, op::ARCHIVED, Value::Null)?;
-                out.archived += 1;
-            }
-        }
-        Ok(out)
-    }
-
-    // -- recovery ----------------------------------------------------------
-
-    /// Truncate torn tails left by interrupted writes.
-    pub fn recover(&self, id: Option<&str>, dry_run: bool) -> Result<RecoverOutcome> {
-        let targets: Vec<String> = match id {
-            Some(id) => vec![id.to_owned()],
-            None => self
-                .store
-                .snapshot()?
-                .records
-                .iter()
-                .map(|r| r.id.clone())
-                .collect(),
-        };
-        let mut out = RecoverOutcome {
-            dry_run,
-            ..Default::default()
-        };
-        for target in targets {
-            let path = self.store.ctx.record_path(&target);
-            let Some((_, dropped)) = record::torn_tail(&path)? else {
-                continue;
-            };
-            out.repaired.push(target.clone());
-            out.bytes_dropped += dropped;
-            if !dry_run {
-                record::truncate_torn(&path)?;
-            }
-        }
-        Ok(out)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Atomic write
-// ---------------------------------------------------------------------------
-
-fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StoreError::Msg("no parent dir".into()))?;
-    let tmp = parent.join(format!(".tmp.{}-{}", std::process::id(), ids::new_alias()));
-    let mut f = fs::File::create(&tmp).map_err(StoreError::Io)?;
-    f.write_all(content).map_err(StoreError::Io)?;
-    f.sync_all().map_err(StoreError::Io)?;
-    drop(f);
-    fs::rename(&tmp, path).map_err(StoreError::Io)?;
-    // Durability: fsync the directory entry too.
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Enrichment and graph helpers
-// ---------------------------------------------------------------------------
-
-/// Read a task into its computed view plus any inconsistencies on disk.
-///
-/// Read-only: nothing is repaired or persisted.
-pub fn get_task(ctx: &Ctx, id: &str) -> Result<(TaskView, Vec<String>)> {
-    let store = ctx.store()?;
-    let record = store.load(id)?;
-    let issues = inconsistencies(ctx, &record, id)?;
-    Ok((store.view(&record, &Index::default()), issues))
-}
-
-/// Report what is wrong with one record. Read-only; `tk check` reports the same
-/// findings for the whole store, and only `tk recover` changes anything.
-pub fn inconsistencies(ctx: &Ctx, record: &Record, expected_id: &str) -> Result<Vec<String>> {
-    let mut issues = Vec::new();
-    if record.id != expected_id {
-        issues.push(format!(
-            "file name {expected_id} does not match the record ID {}",
-            record.id
-        ));
-    }
-    if record.torn {
-        issues.push("the last line was interrupted mid-write and is ignored".to_owned());
-    }
-    for damage in &record.damaged {
-        issues.push(format!("unparseable event {damage}"));
-    }
-    if !ids::is_valid_alias(&record.state.alias) {
-        issues.push(format!("invalid alias {:?}", record.state.alias));
-    }
-    for blocker in &record.state.blocked_by {
-        if !ctx.record_path(blocker).is_file() {
-            issues.push(format!("blocked by missing task {blocker}"));
-        }
-    }
-    if let Some(parent) = &record.state.parent
-        && !ctx.record_path(parent).is_file()
-    {
-        issues.push(format!("parent task {parent} is missing"));
-    }
-    Ok(issues)
-}
-
-fn duplicate_aliases(records: &[Record]) -> Vec<String> {
-    let mut seen: HashMap<&str, &str> = HashMap::new();
-    let mut issues = Vec::new();
-    for record in records {
-        let alias = record.state.alias.as_str();
-        if alias.is_empty() {
-            continue;
-        }
-        match seen.get(alias) {
-            Some(first) => issues.push(format!(
-                "alias {alias} is claimed by both {first} and {}",
-                record.id
-            )),
-            None => {
-                seen.insert(alias, record.id.as_str());
-            }
-        }
-    }
-    issues
-}
-
-pub fn enrich(ctx: &Ctx, record: &Record, index: &Index) -> TaskView {
-    let state = &record.state;
-    let mut blocked_by_incomplete = false;
-    let mut unresolved_blockers = Vec::new();
-    let mut blocker_refs = Vec::new();
-    for blocker in &state.blocked_by {
-        match index.lookup(ctx, blocker) {
-            Some(entry) => {
-                blocker_refs.push(entry.alias);
-                if !entry.status.is_terminal() {
-                    blocked_by_incomplete = true;
-                }
-            }
-            None => {
-                // A missing prerequisite is unresolved, not completed.
-                unresolved_blockers.push(blocker.clone());
-                blocker_refs.push(short_id(blocker));
-                blocked_by_incomplete = true;
-            }
-        }
-    }
-    let parent_ref = state.parent.as_ref().map(|p| {
-        index
-            .lookup(ctx, p)
-            .map(|e| e.alias)
-            .unwrap_or_else(|| short_id(p))
-    });
-    TaskView {
-        rev: record.rev(),
-        blocked_by_incomplete,
-        unresolved_blockers,
-        blocker_refs,
-        parent_ref,
-        task: state.clone(),
-    }
-}
-
-/// Enough of an ID to identify it in passing.
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
-fn would_block_cycle(store: &Store<'_>, task_id: &str, blocker_id: &str) -> Result<bool> {
-    let mut visited = HashSet::new();
-    let mut stack = vec![blocker_id.to_owned()];
-    while let Some(current) = stack.pop() {
-        if current == task_id {
-            return Ok(true);
-        }
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-        if let Ok(record) = store.load(&current) {
-            stack.extend(record.state.blocked_by);
-        }
-    }
-    Ok(false)
-}
-
-fn would_parent_cycle(store: &Store<'_>, task_id: &str, parent_id: &str) -> Result<bool> {
-    let mut visited = HashSet::new();
-    let mut current = parent_id.to_owned();
-    loop {
-        if current == task_id || !visited.insert(current.clone()) {
-            return Ok(true);
-        }
-        match store.load(&current) {
-            Ok(record) => match record.state.parent {
-                Some(parent) => current = parent,
-                None => return Ok(false),
-            },
-            Err(_) => return Ok(false),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Option and outcome types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-pub struct CreateOptions {
-    pub title: String,
-    pub description: Option<String>,
-    pub priority: Option<Priority>,
-    pub project: Option<String>,
-    pub labels: Option<Vec<String>>,
-    pub parent: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct CleanOutcome {
-    pub archived: usize,
-    pub purged: usize,
-    pub references_scrubbed: usize,
-}
-
-#[derive(Debug)]
-pub struct PurgeOutcome {
-    pub deleted: String,
-    pub references_scrubbed: usize,
-    pub referrers: Vec<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct RecoverOutcome {
-    pub repaired: Vec<String>,
-    pub bytes_dropped: u64,
-    pub dry_run: bool,
-}
-
-pub struct RenameResult {
-    pub renamed: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// List / filter / sort
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-pub struct ListOptions {
-    pub search: String,
-    pub hide_terminal: bool,
-    pub status: Option<Status>,
-    pub priority: Option<Priority>,
-    pub project: String,
-    pub label: String,
-    pub parent: Option<Option<String>>,
-    pub roots: bool,
-    /// Include archived tasks (they are hidden by default).
-    pub include_archived: bool,
-    /// Show archived tasks only.
-    pub archived_only: bool,
-    pub limit: usize,
-}
-
-fn matches_list(record: &Record, opts: &ListOptions) -> bool {
-    let state = &record.state;
-    match (
-        state.is_archived(),
-        opts.archived_only,
-        opts.include_archived,
-    ) {
-        (true, false, false) => return false,
-        (false, true, _) => return false,
-        _ => {}
-    }
-    if let Some(status) = opts.status
-        && state.status != status
-    {
-        return false;
-    }
-    if opts.hide_terminal && state.status.is_terminal() {
-        return false;
-    }
-    if !opts.search.is_empty() {
-        let q = opts.search.to_lowercase();
-        let hit = state.title.to_lowercase().contains(&q)
-            || state
-                .description
-                .as_deref()
-                .is_some_and(|d| d.to_lowercase().contains(&q))
-            || state.id.to_lowercase().contains(&q)
-            || state.alias.to_lowercase().contains(&q);
-        if !hit {
-            return false;
-        }
-    }
-    if let Some(priority) = opts.priority
-        && state.priority != priority
-    {
-        return false;
-    }
-    if !opts.project.is_empty() && state.project != opts.project {
-        return false;
-    }
-    if !opts.label.is_empty() && !state.labels.iter().any(|l| l == &opts.label) {
-        return false;
-    }
-    if opts.roots && state.parent.is_some() {
-        return false;
-    }
-    if let Some(parent) = &opts.parent
-        && state.parent.as_ref() != parent.as_ref()
-    {
-        return false;
-    }
-    true
-}
-
-fn status_rank(status: Status) -> u8 {
-    match status {
-        Status::Active => 0,
-        Status::Open => 1,
-        Status::Deferred => 2,
-        Status::Done => 3,
-        Status::Closed => 4,
-    }
-}
-
-fn compare_records(a: &TaskState, b: &TaskState) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let ord = status_rank(a.status).cmp(&status_rank(b.status));
-    if ord != Ordering::Equal {
-        return ord;
-    }
-    if !a.status.is_terminal() {
-        // Priority (1-4, none last), then oldest first: a task list is a queue,
-        // and a stable order helps callers diff two runs.
-        let ord = a.priority.sort_key().cmp(&b.priority.sort_key());
-        if ord != Ordering::Equal {
-            return ord;
-        }
-        return a.created_at.cmp(&b.created_at);
-    }
-    // Terminal: newest completion first.
-    b.completed_at.cmp(&a.completed_at)
 }
 
 // ---------------------------------------------------------------------------
 // Integrity
 // ---------------------------------------------------------------------------
 
-/// Everything wrong with the store, as a sorted list of human sentences.
+/// Everything wrong with the store, as sentences. Empty means clean.
+///
+/// Read-only: nothing is repaired. `tk check` prints these.
 pub fn check_integrity(ctx: &Ctx) -> Result<Vec<String>> {
     ctx.require()?;
-    let mut issues = Vec::new();
+    let store = Store { ctx };
+    let scan = store.scan()?;
+    let mut issues = scan.issues;
 
-    for stray in ctx.top_level_task_files() {
-        issues.push(format!(
-            "{stray} is a task file from the previous layout; the v1 store keeps records in {RECORDS_DIR}/"
-        ));
-    }
-    if ctx.legacy_config_path().exists() {
-        issues.push(format!(
-            "{LEGACY_CONFIG_FILE} is left over from the previous layout and is ignored"
-        ));
-    }
-
-    let store = ctx.store()?;
-    let snapshot = store.snapshot()?;
-    issues.extend(snapshot.issues.iter().cloned());
-
-    for record in &snapshot.records {
-        issues.extend(inconsistencies(ctx, record, &record.id)?);
-    }
-
-    // Aliases and IDs must be usable as typed handles.
-    let known: HashSet<&str> = snapshot.records.iter().map(|r| r.id.as_str()).collect();
-    for record in &snapshot.records {
-        if !ids::is_valid_id(&record.state.id) {
-            issues.push(format!(
-                "record {} carries invalid ID {:?}",
-                record.id, record.state.id
-            ));
-        }
-        if record.state.id != record.id {
-            issues.push(format!(
-                "record {} carries ID {}",
-                record.id, record.state.id
-            ));
-        }
-        for alias in &record.state.legacy_aliases {
-            if snapshot
-                .records
-                .iter()
-                .any(|other| other.id != record.id && other.state.alias == *alias)
-            {
+    let refs: HashSet<&str> = scan.entries.iter().map(|(_, e)| e.r#ref.as_str()).collect();
+    for (path, entry) in &scan.entries {
+        let name = file_name(path);
+        for blocker in &entry.blocked_by {
+            if blocker == &entry.r#ref {
+                issues.push(format!("{name}: blocks itself"));
+            } else if !refs.contains(blocker.as_str()) {
                 issues.push(format!(
-                    "record {} keeps legacy alias {alias}, which is also a live alias",
-                    record.id
+                    "{name}: blocked_by names {blocker}, which is not here"
                 ));
             }
         }
+        if entry.state == State::Open && entry.done.is_some() {
+            issues.push(format!("{name}: state is open but it has a done time"));
+        }
+        if entry.state.is_closed() && entry.done.is_none() {
+            issues.push(format!(
+                "{name}: state is {} but it has no done time",
+                entry.state
+            ));
+        }
+        for (index, line) in entry.log.iter().enumerate() {
+            if line.msg.trim().is_empty() {
+                issues.push(format!("{name}: log entry {} has no message", index + 1));
+            }
+        }
+        if entry.labels.iter().any(|l| l.trim().is_empty()) {
+            issues.push(format!("{name}: has an empty label"));
+        }
     }
 
-    // Cycles are valid JSON but not a valid graph.
-    let blocked: HashMap<String, Vec<String>> = snapshot
-        .records
-        .iter()
-        .map(|r| {
-            (
-                r.id.clone(),
-                r.state
-                    .blocked_by
-                    .iter()
-                    .filter(|b| known.contains(b.as_str()))
-                    .cloned()
-                    .collect(),
-            )
-        })
-        .collect();
-    let parents: HashMap<String, Vec<String>> = snapshot
-        .records
-        .iter()
-        .map(|r| {
-            (
-                r.id.clone(),
-                r.state
-                    .parent
-                    .iter()
-                    .filter(|p| known.contains(p.as_str()))
-                    .cloned()
-                    .collect(),
-            )
-        })
-        .collect();
-    for id in cyclic_nodes(&blocked) {
-        issues.push(format!("record {id} is part of a dependency cycle"));
-    }
-    for id in cyclic_nodes(&parents) {
-        issues.push(format!("record {id} is part of a parent cycle"));
-    }
-
-    issues.sort();
-    issues.dedup();
+    issues.extend(cycles(&scan.entries));
     Ok(issues)
 }
 
-/// Nodes that participate in a cycle of `id -> targets`: a node is in a cycle
-/// exactly when it can reach itself.
-fn cyclic_nodes(edges: &HashMap<String, Vec<String>>) -> Vec<String> {
-    let mut out = Vec::new();
-    for start in edges.keys() {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<&String> = edges.get(start).into_iter().flatten().collect();
-        let mut cyclic = false;
-        while let Some(node) = stack.pop() {
-            if node == start {
-                cyclic = true;
-                break;
-            }
-            if !seen.insert(node.clone()) {
-                continue;
-            }
-            if let Some(next) = edges.get(node) {
-                stack.extend(next.iter());
+/// Report every `blocked_by` loop once, as a readable path.
+fn cycles(entries: &[(PathBuf, Entry)]) -> Vec<String> {
+    let graph: HashMap<&str, &[String]> = entries
+        .iter()
+        .map(|(_, e)| (e.r#ref.as_str(), e.blocked_by.as_slice()))
+        .collect();
+    let mut found: BTreeMap<Vec<&str>, Vec<String>> = BTreeMap::new();
+
+    fn walk<'g>(
+        node: &'g str,
+        graph: &'g HashMap<&'g str, &'g [String]>,
+        stack: &mut Vec<&'g str>,
+        found: &mut BTreeMap<Vec<&'g str>, Vec<String>>,
+    ) {
+        if stack.contains(&node) {
+            let start = stack.iter().position(|n| *n == node).unwrap_or(0);
+            let mut loop_refs: Vec<&str> = stack[start..].to_vec();
+            loop_refs.push(node);
+            let mut key = loop_refs.clone();
+            key.sort_unstable();
+            key.dedup();
+            found
+                .entry(key)
+                .or_insert_with(|| loop_refs.iter().map(|r| (*r).to_owned()).collect());
+            return;
+        }
+        if stack.len() > 64 {
+            return;
+        }
+        stack.push(node);
+        for next in graph.get(node).copied().unwrap_or_default() {
+            if graph.contains_key(next.as_str()) {
+                walk(next, graph, stack, found);
             }
         }
-        if cyclic {
-            out.push(start.clone());
-        }
+        stack.pop();
     }
-    out.sort();
-    out.dedup();
+
+    let mut out = Vec::new();
+    for (_, entry) in entries {
+        let mut stack = Vec::new();
+        walk(&entry.r#ref, &graph, &mut stack, &mut found);
+    }
+    for (_key, cycle) in found {
+        out.push(format!("blocking loop: {}", cycle.join(" -> ")));
+    }
     out
 }
 
-/// Every `.tasks/` directory under `root`, for multi-store locking.
-///
-/// Does not follow symlinks and skips `.git`; results are not sorted.
+/// What a store the binary cannot read might have been.
+pub fn describe_store(ctx: &Ctx) -> String {
+    let mut lines = vec![format!(
+        "store: {} ({}, {})",
+        ctx.tasks_dir.display(),
+        ctx.source.name(),
+        if ctx.exists { "present" } else { "missing" }
+    )];
+    if ctx.exists {
+        match ctx.load_config() {
+            Ok(config) => lines.push(format!("format: {}", config.format)),
+            Err(e) => lines.push(format!("store file: {}", e.code())),
+        }
+        let count = fs::read_dir(&ctx.tasks_dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        name.ends_with(".json") && ids::parse_file_name(&name).is_some()
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        lines.push(format!("entries: {count}"));
+    }
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// The file's own name, for messages and for `file` in a view.
+pub fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Find every `.tasks/` at or under `root`, breadth-first.
 pub fn find_stores(root: &Path) -> Result<Vec<PathBuf>> {
     const MAX_DEPTH: usize = 8;
     let mut out = Vec::new();
@@ -1626,57 +1130,417 @@ pub fn find_stores(root: &Path) -> Result<Vec<PathBuf>> {
             queue.push((entry.path(), depth + 1));
         }
     }
+    out.sort();
     Ok(out)
+}
+
+/// Write a file so a reader sees either the old contents or the new ones.
+///
+/// Temp file in the same directory, `fsync` the data, rename over the target,
+/// then `fsync` the directory so the rename itself survives a power loss.
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::Msg("no parent dir".into()))?;
+    let tmp = parent.join(format!(".tmp.{}-{}", std::process::id(), ids::new_ref()));
+    let mut f = fs::File::create(&tmp).map_err(StoreError::Io)?;
+    f.write_all(content).map_err(StoreError::Io)?;
+    f.sync_all().map_err(StoreError::Io)?;
+    drop(f);
+    fs::rename(&tmp, path).map_err(StoreError::Io)?;
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn cyclic_nodes_finds_loops() {
-        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-        edges.insert("a".into(), vec!["b".into()]);
-        edges.insert("b".into(), vec!["a".into()]);
-        edges.insert("c".into(), vec!["d".into()]);
-        edges.insert("d".into(), vec![]);
-        assert_eq!(cyclic_nodes(&edges), vec!["a".to_owned(), "b".to_owned()]);
+    fn store() -> (tempfile::TempDir, Ctx) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = Ctx::at_tasks_dir(dir.path().join(TASKS_DIR));
+        ctx.txn_init()
+            .expect("init")
+            .update_config(|_| {})
+            .expect("config");
+        (dir, ctx)
     }
 
     #[test]
-    fn duplicate_aliases_are_reported() {
-        // Two records claiming one alias would make every typed reference
-        // ambiguous, so the resolver must never have to choose.
-        let mk = |id: &str, alias: &str| Record {
-            id: id.to_owned(),
-            events: Vec::new(),
-            state: TaskState {
-                id: id.to_owned(),
-                alias: alias.to_owned(),
-                legacy_aliases: Vec::new(),
-                project: "p".into(),
-                title: "t".into(),
-                description: None,
-                status: Status::Open,
-                priority: Priority::Medium,
-                labels: Vec::new(),
-                parent: None,
-                blocked_by: Vec::new(),
-                logs: Vec::new(),
-                created_at: "x".into(),
-                updated_at: "y".into(),
-                completed_at: None,
-                archived_at: None,
-                checkpoint: None,
-                links: Vec::new(),
-                acceptance: Vec::new(),
-                evidence: Vec::new(),
-            },
-            torn: false,
-            damaged: Vec::new(),
-        };
-        let issues = duplicate_aliases(&[mk("a", "zzzz"), mk("b", "zzzz"), mk("c", "yyyy")]);
+    fn a_scan_on_a_missing_store_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::at_tasks_dir(dir.path().join(TASKS_DIR));
+        let scan = Store { ctx: &ctx }.scan().expect("scan");
+        assert!(scan.entries.is_empty());
+        assert!(scan.issues.is_empty());
+    }
+
+    #[test]
+    fn create_then_read_back() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn
+            .create("Rewrite the auth layer", "2026-01-10T12:00:00Z")
+            .unwrap();
+        assert_eq!(view.entry.title, "Rewrite the auth layer");
+        assert_eq!(view.entry.state, State::Open);
+        assert!(ids::is_valid_ref(&view.entry.r#ref));
+        assert_eq!(
+            view.file,
+            format!("{}-rewrite-the-auth-layer.json", view.entry.r#ref)
+        );
+        assert!(view.is_ready());
+
+        let store = ctx.store().unwrap();
+        let loaded = store.get(&view.entry.r#ref).unwrap();
+        assert_eq!(loaded.entry, view.entry);
+        assert_eq!(loaded.rev, view.rev, "rev is stable across a read");
+    }
+
+    #[test]
+    fn the_document_on_disk_is_pretty_printed_with_a_trailing_newline() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn.create("One line", "2026-01-10T12:00:00Z").unwrap();
+        let raw = fs::read_to_string(ctx.tasks_dir.join(&view.file)).unwrap();
+        assert!(raw.ends_with("}\n"), "{raw:?}");
+        assert!(
+            raw.contains("\n  \"ref\""),
+            "pretty-printed, two-space indent"
+        );
+    }
+
+    #[test]
+    fn an_empty_title_is_refused() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        assert!(matches!(
+            txn.create("   ", "2026-01-10T12:00:00Z"),
+            Err(StoreError::EmptyTitle)
+        ));
+    }
+
+    #[test]
+    fn writing_over_a_title_change_keeps_the_slug_and_the_file() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn
+            .create("Rewrite the auth layer", "2026-01-10T12:00:00Z")
+            .unwrap();
+        let path = ctx.tasks_dir.join(&view.file);
+
+        let (old_path, mut entry) = txn.load(&view.entry.r#ref).unwrap();
+        entry.title = "Rewrite the auth layer, properly".into();
+        Txn::touch(&mut entry, "2026-02-01T00:00:00Z");
+        let new_path = txn.write(&entry, Some(&old_path)).unwrap();
+
+        assert_eq!(new_path, path, "a title change does not move the file");
+        let reread = ctx.store().unwrap().get(&view.entry.r#ref).unwrap();
+        assert_eq!(reread.entry.title, "Rewrite the auth layer, properly");
+        assert_eq!(
+            reread.entry.created, view.entry.created,
+            "created never moves"
+        );
+    }
+
+    #[test]
+    fn an_explicit_slug_moves_the_file_and_leaves_nothing_behind() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn.create("Widget", "2026-01-10T12:00:00Z").unwrap();
+        let old_path = ctx.tasks_dir.join(&view.file);
+
+        let (path, entry) = txn.load(&view.entry.r#ref).unwrap();
+        let moved = txn.write_as(&entry, "gadget", Some(&path)).unwrap();
+        assert_eq!(file_name(&moved), format!("{}-gadget.json", entry.r#ref));
+        assert!(!old_path.exists(), "the old file is gone");
+        assert_eq!(ctx.store().unwrap().known().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn refs_are_unique_and_resolvable_by_title() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let a = txn
+            .create("Rewrite the auth layer", "2026-01-10T12:00:00Z")
+            .unwrap();
+        let b = txn
+            .create("Write the parser", "2026-01-11T12:00:00Z")
+            .unwrap();
+        assert_ne!(a.entry.r#ref, b.entry.r#ref);
+
+        let store = ctx.store().unwrap();
+        assert_eq!(store.resolve(&a.entry.r#ref).unwrap(), a.entry.r#ref);
+        assert_eq!(store.resolve("parser").unwrap(), b.entry.r#ref);
+        assert!(matches!(
+            store.resolve("nope"),
+            Err(StoreError::Id(IdError::NotFound(_)))
+        ));
+    }
+
+    #[test]
+    fn listing_shows_open_entries_oldest_first_and_hides_closed_ones() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let newer = txn.create("Newer", "2026-02-01T00:00:00Z").unwrap();
+        let older = txn.create("Older", "2026-01-01T00:00:00Z").unwrap();
+        let mut done = txn.load(&newer.entry.r#ref).unwrap().1;
+        done.state = State::Done;
+        done.done = Some("2026-02-02T00:00:00Z".into());
+        txn.write(&done, None).unwrap();
+
+        let store = ctx.store().unwrap();
+        let (views, issues) = store.list(&Filter::default()).unwrap();
+        assert!(issues.is_empty());
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].entry.r#ref, older.entry.r#ref);
+
+        let (all, _) = store
+            .list(&Filter {
+                include_closed: true,
+                ..Filter::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].entry.r#ref, older.entry.r#ref, "oldest first");
+    }
+
+    #[test]
+    fn filter_by_label_search_state_and_readiness() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let mut a = txn
+            .load(
+                &txn.create("Alpha", "2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .entry
+                    .r#ref,
+            )
+            .unwrap()
+            .1;
+        a.labels = vec!["backend".into()];
+        a.status = Some("waiting on review".into());
+        txn.write(&a, None).unwrap();
+        let b = txn.create("Beta", "2026-01-02T00:00:00Z").unwrap();
+        let mut blocking = txn.load(&b.entry.r#ref).unwrap().1;
+        blocking.blocked_by = vec![a.r#ref.clone()];
+        txn.write(&blocking, None).unwrap();
+
+        let store = ctx.store().unwrap();
+        let count = |f: Filter| store.list(&f).unwrap().0.len();
+        assert_eq!(
+            count(Filter {
+                label: "backend".into(),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            count(Filter {
+                search: "ALPHA".into(),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            count(Filter {
+                search: "review".into(),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            count(Filter {
+                state: Some(State::Open),
+                ..Default::default()
+            }),
+            2
+        );
+        assert_eq!(
+            count(Filter {
+                ready: true,
+                ..Default::default()
+            }),
+            1,
+            "a blocked entry is not ready"
+        );
+        assert_eq!(
+            count(Filter {
+                blocked: Some(true),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            count(Filter {
+                limit: 1,
+                ..Default::default()
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn check_reports_what_is_wrong_instead_of_hiding_it() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let a = txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
+        let b = txn.create("Beta", "2026-01-02T00:00:00Z").unwrap();
+
+        // Dirty the store by hand, the way an editor or an interrupted write would.
+        let path = ctx.tasks_dir.join(&a.file);
+        let mut entry: Entry = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        entry.blocked_by = vec![b.entry.r#ref.clone(), "zzzz".into(), entry.r#ref.clone()];
+        fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+        fs::write(ctx.tasks_dir.join("stray.json"), "{}").unwrap();
+        fs::write(ctx.tasks_dir.join("a7b3-broken.json"), "{not json").unwrap();
+
+        let issues = check_integrity(&ctx).unwrap();
+        let all = issues.join("\n");
+        for expected in [
+            "blocks itself",
+            "zzzz, which is not here",
+            "stray.json",
+            "a7b3-broken.json",
+        ] {
+            assert!(all.contains(expected), "{expected} missing from:\n{all}");
+        }
+    }
+
+    #[test]
+    fn check_finds_a_blocking_loop_however_long() {
+        let entries: Vec<(PathBuf, Entry)> = ["a7b3", "b7c4", "c7d5"]
+            .iter()
+            .enumerate()
+            .map(|(i, r#ref)| {
+                let mut entry = Entry::new((*r#ref).into(), "t".into(), "c".into());
+                let next = ["a7b3", "b7c4", "c7d5"][(i + 1) % 3];
+                entry.blocked_by = vec![next.to_owned()];
+                (PathBuf::from(format!("{name}.json", name = r#ref)), entry)
+            })
+            .collect();
+        let issues = cycles(&entries);
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(issues[0].contains("zzzz"), "{issues:?}");
+        assert!(issues[0].contains("a7b3"), "{issues:?}");
+        assert!(issues[0].contains("->"), "{issues:?}");
+    }
+
+    #[test]
+    fn state_coherence_is_checked() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let a = txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
+        let path = ctx.tasks_dir.join(&a.file);
+        let mut entry: Entry = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        entry.done = Some("2026-01-02T00:00:00Z".into());
+        fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+        let all = check_integrity(&ctx).unwrap().join("\n");
+        assert!(all.contains("open but it has a done time"), "{all}");
+
+        entry.state = State::Done;
+        entry.done = None;
+        fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+        let all = check_integrity(&ctx).unwrap().join("\n");
+        assert!(all.contains("no done time"), "{all}");
+    }
+
+    #[test]
+    fn the_format_gate_names_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = dir.path().join(TASKS_DIR);
+        fs::create_dir_all(&tasks).unwrap();
+        let ctx = Ctx::at_tasks_dir(tasks.clone());
+
+        // No store file at all.
+        match ctx.check_format() {
+            Err(StoreError::NotStore { detail, format, .. }) => {
+                assert_eq!(format, FORMAT);
+                assert!(detail.contains(STORE_FILE), "{detail}");
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+
+        // A v1 layout.
+        fs::write(tasks.join("store.json"), r#"{"format":2}"#).unwrap();
+        match ctx.check_format() {
+            Err(StoreError::NotStore { detail, .. }) => assert!(detail.contains("v1"), "{detail}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        assert_eq!(ctx.check_format().unwrap_err().code(), code::NOT_A_STORE);
+
+        // A v0 layout.
+        fs::remove_file(tasks.join("store.json")).unwrap();
+        fs::write(tasks.join("config.json"), "{}").unwrap();
+        match ctx.check_format() {
+            Err(StoreError::NotStore { detail, .. }) => assert!(detail.contains("v0"), "{detail}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+
+        // A wrong format number in our own file.
+        fs::write(tasks.join(STORE_FILE), r#"{"format":9}"#).unwrap();
+        match ctx.check_format() {
+            Err(StoreError::NotStore { detail, .. }) => {
+                assert!(detail.contains("format 9"), "{detail}")
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+
+        fs::write(tasks.join(STORE_FILE), format!(r#"{{"format":{FORMAT}}}"#)).unwrap();
+        assert!(ctx.check_format().is_ok());
+    }
+
+    #[test]
+    fn init_is_idempotent_and_refuses_nothing_it_wrote() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn_init().unwrap();
+        let config = txn.config().unwrap();
+        assert_eq!(config.format, FORMAT);
+        assert!(ctx.tasks_dir.join(".gitignore").exists());
+    }
+
+    #[test]
+    fn revocation_changes_when_the_content_does() {
+        let mut entry = Entry::new("a7b3".into(), "t".into(), "2026-01-01T00:00:00Z".into());
+        let before = fingerprint(&entry);
+        entry.status = Some("working".into());
+        assert_ne!(fingerprint(&entry), before);
+    }
+
+    #[test]
+    fn stale_revision_is_refused() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
+        let store = ctx.store().unwrap();
+        assert!(store.check_rev(&view.entry.r#ref, Some(&view.rev)).is_ok());
+        assert!(matches!(
+            store.check_rev(&view.entry.r#ref, Some("deadbeef")),
+            Err(StoreError::StaleRevision { .. })
+        ));
+        assert!(store.check_rev(&view.entry.r#ref, None).is_ok());
+    }
+
+    #[test]
+    fn unknown_keys_survive_a_tk_write() {
+        let (_dir, ctx) = store();
+        let txn = ctx.txn().unwrap();
+        let view = txn.create("Alpha", "2026-01-01T00:00:00Z").unwrap();
+        let path = ctx.tasks_dir.join(&view.file);
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw["assignee"] = serde_json::json!("nick");
+        fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let (path, mut entry) = txn.load(&view.entry.r#ref).unwrap();
+        entry.status = Some("picked up".into());
+        Txn::touch(&mut entry, "2026-01-02T00:00:00Z");
+        txn.write(&entry, Some(&path)).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["assignee"], serde_json::json!("nick"));
+        assert_eq!(raw["status"], serde_json::json!("picked up"));
     }
 }

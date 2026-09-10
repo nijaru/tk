@@ -1,58 +1,113 @@
-//! `tk add`
+//! Creating entries, and creating the store.
 
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
-use crate::model::Priority;
-use crate::ops::{self, Mutation};
-use crate::store::CreateOptions;
+use crate::format;
+use crate::ops;
+use crate::store::Result;
+
+/// Initialize .tasks/ here
+#[derive(Args, Debug)]
+pub struct Init {
+    /// Initialize even if a store already exists here
+    #[usage(long)]
+    pub force: bool,
+}
+
+impl RunWith<AppCtx> for Init {
+    type Output = miette::Result<()>;
+
+    fn run_with(self, ctx: AppCtx) -> Self::Output {
+        if ctx.store.exists && !self.force {
+            let existing = ctx.store.tasks_dir.display().to_string();
+            return Err(ctx.fail(
+                "init",
+                crate::output::code::INVALID_INPUT,
+                &format!("a store already exists at {existing}"),
+                &serde_json::Value::Null,
+                Vec::new(),
+            ));
+        }
+        ctx.store.txn_init()?;
+        let path = ctx.store.tasks_dir.display().to_string();
+        ctx.emit(
+            "init",
+            &serde_json::json!({ "store": path, "format": crate::store::FORMAT }),
+            None,
+            Vec::new(),
+            || format!("initialized {path}/"),
+        );
+        Ok(())
+    }
+}
 
 /// Create a task
-#[derive(Args)]
+#[derive(Args, Debug)]
 pub struct Add {
-    /// Task title
-    #[usage(required)]
-    pub title: Vec<String>,
-    /// Priority (0-4, p0-p4, or none/urgent/high/medium/low)
-    #[usage(short = 'p', long)]
-    pub priority: Option<String>,
-    /// Project (display grouping; identity is unaffected)
-    #[usage(short = 'P', long)]
-    pub project: Option<String>,
-    /// Description
-    #[usage(short = 'd', long)]
-    pub desc: Option<String>,
-    /// Labels (comma-separated, repeatable)
+    /// What needs doing
+    pub title: String,
+    /// Labels, comma-separated
     #[usage(short = 'l', long, delimiter = ',')]
-    pub labels: Vec<String>,
-    /// Parent task (alias, ID, or ID prefix)
+    pub label: Vec<String>,
+    /// What must be true for this to count as done
+    #[usage(long, delimiter = ',')]
+    pub accept: Vec<String>,
+    /// A ref this task waits on
+    #[usage(short = 'b', long = "blocked-by", value_name = "REF")]
+    pub blocked_by: Vec<String>,
+    /// A short note about where things stand
     #[usage(long)]
-    pub parent: Option<String>,
+    pub status: Option<String>,
+    /// Print only the new ref
+    #[usage(short = 'q', long)]
+    pub quiet: bool,
+}
+
+impl Add {
+    /// Build the entry, then apply everything else that came with it.
+    pub fn apply(self, txn: &crate::store::Txn<'_>, now: &str) -> Result<crate::model::EntryView> {
+        let mut view = ops::create(txn, &self.title, now)?;
+        let edit = ops::Edit {
+            labels: (!self.label.is_empty()).then(|| self.label.clone()),
+            status: self.status.clone().map(Some),
+            acceptance: ops::AcceptanceChange {
+                set: (!self.accept.is_empty()).then(|| self.accept.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if !edit.is_empty() {
+            view = ops::apply_edit(txn, &view.entry.r#ref, &edit, now)?;
+        }
+        for blocker in &self.blocked_by {
+            view = ops::add_blocker(txn, &view.entry.r#ref, blocker, now)?;
+        }
+        Ok(view)
+    }
 }
 
 impl RunWith<AppCtx> for Add {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let priority = self.priority.map(|p| Priority::parse(&p)).transpose()?;
-        // Creation takes the store lock: alias uniqueness is store-wide, and
-        // parent validation must not race a concurrent delete.
         ctx.require_store()?;
-        let m = Mutation::locked(&ctx.store)?;
-        let parent = self.parent.map(|p| m.store().resolve(&p)).transpose()?;
-        let t = ops::create(
-            &m,
-            CreateOptions {
-                title: self.title.join(" "),
-                description: self.desc,
-                priority,
-                project: self.project,
-                labels: (!self.labels.is_empty()).then_some(self.labels),
-                parent,
-            },
-        )?;
-        let human = format!("Created task {} ({})", t.task.alias, t.task.id);
-        ctx.emit("add", &t, Some(t.rev.clone()), Vec::new(), || human);
+        let now = ctx.now();
+        let quiet = self.quiet;
+        let view = {
+            let txn = ctx.store.txn()?;
+            self.apply(&txn, &now)?
+        };
+        let new_ref = view.entry.r#ref.clone();
+        let rev = view.rev.clone();
+        let title = format::truncate(&view.entry.title, 70);
+        ctx.emit("add", &view, Some(rev), Vec::new(), move || {
+            if quiet {
+                new_ref
+            } else {
+                format!("{new_ref}  {title}")
+            }
+        });
         Ok(())
     }
 }

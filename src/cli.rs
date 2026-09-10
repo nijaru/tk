@@ -11,14 +11,15 @@ pub struct AppCtx {
     pub color: bool,
 }
 
-/// Minimal task tracker. Append-only JSON records in .tasks/ — no daemons, no runtime.
+/// Minimal task tracker. One JSON document per task in .tasks/ — no daemon, no
+/// index, no database.
 #[derive(Cli)]
 #[usage(bin = "tk", version, run_with)]
 pub struct Cli {
     /// Output as JSON
     #[usage(short = 'j', long, global)]
     pub json: bool,
-    /// Run in a different directory
+    /// Run in a different directory (or a configured alias)
     #[usage(short = 'C', long, global, value_name = "DIR")]
     pub dir: Option<String>,
     /// Task store directory: exact path, must already exist (no discovery)
@@ -30,72 +31,59 @@ pub struct Cli {
 
 #[derive(Subcommands)]
 #[usage(run_with)]
+// Commands hold their parsed arguments, and some commands have many flags; the
+// enum is built once per process.
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Initialize .tasks/ in the current directory
+    /// Create .tasks/ here
     Init(crate::commands::Init),
     /// Create a task
+    #[usage(alias = "new")]
     Add(crate::commands::Add),
     /// List tasks
     #[usage(alias = "ls")]
     List(crate::commands::List),
-    /// List active/open unblocked tasks
+    /// List what can be started now
     #[usage(alias = "rdy")]
     Ready(crate::commands::Ready),
-    /// Show task details
+    /// Show one task
     Show(crate::commands::Show),
-    /// Mark a task as being worked on (open → active; not a claim)
-    #[usage(alias = "active")]
-    Start(crate::commands::Start),
-    /// Reset a task status to open
-    Open(crate::commands::Open),
-    /// Defer a task
-    Defer(crate::commands::Defer),
-    /// Complete a task
+    /// Add a log entry
+    #[usage(alias = "log")]
+    Note(crate::commands::Note),
+    /// Replace the current status (the summary, not the log)
+    Status(crate::commands::Status),
+    /// Move a task to a state: open, done, or dropped
+    State(crate::commands::State),
+    /// Mark a task done
     Done(crate::commands::Done),
-    /// Close/cancel a task
-    Close(crate::commands::Close),
-    /// Edit a task
+    /// Drop a task without doing it
+    Drop(crate::commands::Drop),
+    /// Change a task's labels
+    #[usage(alias = "tag")]
+    Label(crate::commands::Label),
+    /// Edit a task's fields in one write
     Edit(crate::commands::Edit),
-    /// Replace the current checkpoint (one summary, not the log)
-    #[usage(alias = "ck")]
-    Checkpoint(crate::commands::Checkpoint),
-    /// Add document links (paths or URLs) to a task
-    Link(crate::commands::Link),
-    /// Remove links from a task
-    Unlink(crate::commands::Unlink),
-    /// Add or change what must be true for this task to be done
+    /// Add or change what must be true for a task to be done
     Accept(crate::commands::Accept),
-    /// Add or change how completion was verified
-    Evidence(crate::commands::Evidence),
-    /// Archive a done/closed task without deleting it
-    Archive(crate::commands::Archive),
-    /// Return an archived task to active views
-    Unarchive(crate::commands::Unarchive),
-    /// Add a log entry to a task
-    Log(crate::commands::Log),
     /// Add a blocker dependency
     Block(crate::commands::Block),
     /// Remove a blocker dependency
     Unblock(crate::commands::Unblock),
-    /// Delete a task record
+    /// Delete a task
     #[usage(alias = "rm")]
     Purge(crate::commands::Purge),
-    /// Drop a record's torn last line (from an interrupted write)
-    Recover(crate::commands::Recover),
-    /// Move a task to a different project
-    Mv(crate::commands::Mv),
-    /// Apply a batch of intents from stdin under one lock
-    Apply(crate::commands::Apply),
-    /// Archive completed tasks older than a threshold
-    Clean(crate::commands::Clean),
     /// Check store integrity (non-zero exit on findings)
+    #[usage(alias = "ck")]
     Check(crate::commands::Check),
     /// Print the resolved task store location
     Path(crate::commands::StorePath),
     /// Run a command while holding the store mutation lock
     Lock(crate::commands::Lock),
-    /// Show or set configuration
+    /// Show or change configuration
     Config(crate::commands::Config),
+    /// Apply a batch of intents from stdin under one lock
+    Apply(crate::commands::Apply),
 }
 
 pub fn run() -> miette::Result<()> {
@@ -132,13 +120,13 @@ pub fn run() -> miette::Result<()> {
 /// The failure's kind, for the JSON envelope.
 ///
 /// Recovered from the error's concrete type: miette's own `code()` is left empty
-/// so human-facing output stays clean, which means the caller walks the types it
-/// knows about. Unknown failures report `error`.
+/// so human-facing output does not lead with a machine string, which means the
+/// caller walks the types it knows about. Unknown failures report `error`.
 fn error_code(err: &miette::Report) -> String {
+    use crate::ids::IdError;
     use crate::model::ModelError;
-    use crate::output::InputError;
+    use crate::output::{InputError, code};
     use crate::store::StoreError;
-    use crate::{ids::IdError, output::code};
 
     if let Some(store_error) = err.downcast_ref::<StoreError>() {
         return store_error.code().to_owned();
@@ -150,7 +138,7 @@ fn error_code(err: &miette::Report) -> String {
         return match id_error {
             IdError::NotFound(_) => code::NOT_FOUND,
             IdError::Ambiguous { .. } => code::AMBIGUOUS,
-            IdError::BadProject(_) | IdError::TooShort(_) => code::INVALID_INPUT,
+            IdError::Empty => code::INVALID_INPUT,
         }
         .to_owned();
     }
@@ -169,31 +157,22 @@ impl Commands {
             Self::List(_) => "list",
             Self::Ready(_) => "ready",
             Self::Show(_) => "show",
-            Self::Start(_) => "start",
-            Self::Open(_) => "open",
-            Self::Defer(_) => "defer",
+            Self::Note(_) => "note",
+            Self::Status(_) => "status",
+            Self::State(_) => "state",
             Self::Done(_) => "done",
-            Self::Close(_) => "close",
+            Self::Drop(_) => "drop",
+            Self::Label(_) => "label",
             Self::Edit(_) => "edit",
-            Self::Checkpoint(_) => "checkpoint",
-            Self::Link(_) => "link",
-            Self::Unlink(_) => "unlink",
             Self::Accept(_) => "accept",
-            Self::Evidence(_) => "evidence",
-            Self::Archive(_) => "archive",
-            Self::Unarchive(_) => "unarchive",
-            Self::Log(_) => "log",
             Self::Block(_) => "block",
             Self::Unblock(_) => "unblock",
             Self::Purge(_) => "purge",
-            Self::Recover(_) => "recover",
-            Self::Mv(_) => "mv",
-            Self::Apply(_) => "apply",
-            Self::Clean(_) => "clean",
             Self::Check(_) => "check",
             Self::Path(_) => "path",
             Self::Lock(_) => "lock",
             Self::Config(_) => "config",
+            Self::Apply(_) => "apply",
         }
     }
 }

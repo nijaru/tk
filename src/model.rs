@@ -1,548 +1,356 @@
-//! Domain model: task state, config, and their JSON shapes.
+//! The record: one entry, one JSON document, and nothing else.
 //!
-//! A task's current state is a projection over its record's events (see
-//! [`crate::record`]). This module owns the projected shape and the value
-//! types; it knows nothing about files or events.
+//! Measurement decided this shape. The content of a real store is short
+//! single-line strings — descriptions median 196 characters with 0% containing a
+//! newline, log messages median 326 with 1 in 337 containing one — so the format
+//! that handles long strings correctly and needs no parser of its own wins over
+//! the one that is nicer for prose nobody writes.
 //!
-//! The reader stays lenient where leniency cannot hide a mistake: unknown
-//! fields are ignored and explicit `null` reads as an empty list, so a record
-//! written by a migrated or newer writer still loads.
+//! The vocabulary is measured too. Three states, no priority, no project: across
+//! 169 real entries `priority` was never set to anything but its default,
+//! `project` was always the store's own name, and of five statuses two were used
+//! twice and one (`active`) was a claim the tool cannot enforce. Labels carry
+//! urgency; `created` carries order.
 
-use std::collections::BTreeMap;
 use std::fmt;
-use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-// ---------------------------------------------------------------------------
-// Status
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Status {
-    Deferred,
+pub enum State {
     Open,
-    Active,
     Done,
-    Closed,
+    Dropped,
 }
 
-impl Status {
-    /// Lenient parse: case-insensitive, plus the retired `cancelled` names
-    /// (migration and hand-written stores still contain them).
-    pub fn parse(s: &str) -> Result<Self, ModelError> {
-        match s.trim().to_lowercase().as_str() {
-            "deferred" => Ok(Self::Deferred),
+impl State {
+    pub fn parse(value: &str) -> Result<Self, ModelError> {
+        match value.trim().to_lowercase().as_str() {
             "open" => Ok(Self::Open),
-            "active" => Ok(Self::Active),
             "done" => Ok(Self::Done),
-            "closed" | "cancelled" | "canceled" => Ok(Self::Closed),
-            other => Err(ModelError::BadStatus(other.to_owned())),
+            "dropped" | "closed" | "cancelled" | "canceled" => Ok(Self::Dropped),
+            other => Err(ModelError::BadState(other.to_owned())),
         }
     }
 
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Closed)
-    }
-}
-
-impl<'de> Deserialize<'de> for Status {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        Status::parse(&s).map_err(de::Error::custom)
-    }
-}
-
-impl FromStr for Status {
-    type Err = ModelError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Status::parse(s)
-    }
-}
-
-impl fmt::Display for Status {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::Deferred => "deferred",
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::Open => "open",
-            Self::Active => "active",
             Self::Done => "done",
-            Self::Closed => "closed",
-        };
-        f.write_str(s)
+            Self::Dropped => "dropped",
+        }
+    }
+
+    /// Done or dropped: finished with, one way or another.
+    pub fn is_closed(self) -> bool {
+        !matches!(self, Self::Open)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Priority
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Priority {
-    None = 0,
-    Urgent = 1,
-    High = 2,
-    Medium = 3,
-    Low = 4,
-}
-
-impl Priority {
-    /// Accepts `0-4`, `p0-p4`, and `none/urgent/high/medium/low`.
-    pub fn parse(s: &str) -> Result<Self, ModelError> {
-        let t = s.trim().to_lowercase();
-        if let Some(p) = Self::from_name(&t) {
-            return Ok(p);
-        }
-        let digits = t.strip_prefix('p').unwrap_or(&t);
-        match digits.parse::<u8>() {
-            Ok(0) => Ok(Self::None),
-            Ok(1) => Ok(Self::Urgent),
-            Ok(2) => Ok(Self::High),
-            Ok(3) => Ok(Self::Medium),
-            Ok(4) => Ok(Self::Low),
-            _ => Err(ModelError::BadPriority(s.to_owned())),
-        }
-    }
-
-    pub fn from_name(s: &str) -> Option<Self> {
-        match s {
-            "none" => Some(Self::None),
-            "urgent" => Some(Self::Urgent),
-            "high" => Some(Self::High),
-            "medium" => Some(Self::Medium),
-            "low" => Some(Self::Low),
-            _ => None,
-        }
-    }
-
-    pub fn from_u8(n: u8) -> Option<Self> {
-        match n {
-            0 => Some(Self::None),
-            1 => Some(Self::Urgent),
-            2 => Some(Self::High),
-            3 => Some(Self::Medium),
-            4 => Some(Self::Low),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Urgent => "urgent",
-            Self::High => "high",
-            Self::Medium => "medium",
-            Self::Low => "low",
-        }
-    }
-
-    /// Short label like `p1`.
-    pub fn short(self) -> String {
-        format!("p{}", self as u8)
-    }
-
-    /// Sort key: 1-4 first, `none` last.
-    pub fn sort_key(self) -> u8 {
-        match self {
-            Self::None => 5,
-            p => p as u8,
-        }
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-impl Serialize for Priority {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u8(*self as u8)
-    }
-}
-
-impl<'de> Deserialize<'de> for Priority {
+impl<'de> Deserialize<'de> for State {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let n = u8::deserialize(d)?;
-        Priority::from_u8(n).ok_or_else(|| de::Error::custom(format!("invalid priority {n}")))
+        let raw = String::deserialize(d)?;
+        State::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One log line: what happened, and when it was said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     #[serde(default)]
     pub ts: String,
-    #[serde(default)]
     pub msg: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawLog {
-    Structured(LogEntry),
-    Legacy(String),
-    Null,
-}
-
-/// `Vec` that also accepts explicit `null`, which the Go writer emitted for
-/// empty slices and older writers still produce.
-fn null_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+/// `Vec` that also accepts an explicit `null`, which readers of older files and
+/// hand-edited documents both produce.
+fn null_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
 }
 
-fn deserialize_logs<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<LogEntry>, D::Error> {
-    let raw = Option::<Vec<RawLog>>::deserialize(d)?.unwrap_or_default();
-    Ok(raw
-        .into_iter()
-        .map(|r| match r {
-            RawLog::Structured(e) => e,
-            RawLog::Legacy(s) => parse_legacy_log(&s),
-            RawLog::Null => LogEntry::default(),
-        })
-        .collect())
-}
-
-/// Legacy entries were plain strings, optionally `"<timestamp>: <message>"`.
-pub fn parse_legacy_log(value: &str) -> LogEntry {
-    if is_timestamp(value) {
-        return LogEntry {
-            ts: value.to_owned(),
-            msg: String::new(),
-        };
-    }
-    for (i, c) in value.char_indices() {
-        if c == ':' && is_timestamp(&value[..i]) {
-            return LogEntry {
-                ts: value[..i].to_owned(),
-                msg: value[i + 1..].trim_start_matches([' ', '\t']).to_owned(),
-            };
-        }
-    }
-    LogEntry {
-        ts: String::new(),
-        msg: value.to_owned(),
-    }
-}
-
-fn is_timestamp(value: &str) -> bool {
-    use chrono::{DateTime, NaiveDate};
-    if NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok() {
-        return true;
-    }
-    DateTime::parse_from_rfc3339(value).is_ok()
-}
-
-// ---------------------------------------------------------------------------
-// Task state
-// ---------------------------------------------------------------------------
-
-/// The current state of one task: everything that is true about it now.
+/// One entry, exactly as it appears on disk.
 ///
-/// Written verbatim as the `created` event's payload, so a record is
-/// self-describing from its first line.
+/// Field order is the file's key order, and the fields always written are
+/// written even when empty, so the document has one shape rather than several.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskState {
-    /// ULID. Immutable.
-    pub id: String,
-    /// Short handle. Immutable; assigned once at creation.
-    pub alias: String,
-    /// Aliases from a migrated store, kept resolvable during cutover.
-    #[serde(default, deserialize_with = "null_vec")]
-    pub legacy_aliases: Vec<String>,
-    /// Display grouping. Mutable; never part of identity.
-    pub project: String,
+pub struct Entry {
+    #[serde(rename = "ref")]
+    pub r#ref: String,
     pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub status: Status,
-    pub priority: Priority,
+    pub state: State,
     #[serde(default, deserialize_with = "null_vec")]
     pub labels: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
+    pub created: String,
+    pub updated: String,
+    #[serde(default)]
+    pub done: Option<String>,
     #[serde(default, deserialize_with = "null_vec")]
     pub blocked_by: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_logs")]
-    pub logs: Vec<LogEntry>,
-    pub created_at: String,
-    pub updated_at: String,
+    /// Replaceable summary of where things stand. The log is the history; this
+    /// is the current state of play.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_at: Option<String>,
-    /// Replaceable summary of where the work stands: result, blocker, next
-    /// action, and verification references. Not a second status store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<String>,
-    /// References to research, decisions, or source locations relevant here.
-    #[serde(default, deserialize_with = "null_vec")]
-    pub links: Vec<String>,
-    /// What must be true for this task to count as done.
+    pub status: Option<String>,
+    /// What must be true for this to count as done.
     #[serde(default, deserialize_with = "null_vec")]
     pub acceptance: Vec<String>,
-    /// How completion was verified (commands, paths, commit SHAs).
+    /// What was done about it, oldest first.
     #[serde(default, deserialize_with = "null_vec")]
-    pub evidence: Vec<String>,
-}
-
-impl TaskState {
-    pub fn is_archived(&self) -> bool {
-        self.archived_at.is_some()
-    }
-}
-
-/// Task state plus computed view fields (what `--json` emits).
-#[derive(Debug, Clone, Serialize)]
-pub struct TaskView {
+    pub log: Vec<LogEntry>,
+    /// Keys tk does not know. Preserved rather than dropped, so a field a human
+    /// added by hand survives the next write.
     #[serde(flatten)]
-    pub task: TaskState,
-    /// Revision token for the record as read. Pass it back as `--if-rev` to
-    /// reject a write prepared against a stale read.
-    pub rev: String,
-    /// A blocker is incomplete, or refers to a task that no longer resolves.
-    /// Unresolved blockers count as blocking, not as completed.
-    pub blocked_by_incomplete: bool,
-    /// Blockers that do not resolve to a record in the store.
-    #[serde(default)]
-    pub unresolved_blockers: Vec<String>,
-    /// `blocked_by` rendered the way a person would type it: the blocker's
-    /// alias when it resolves, otherwise a shortened ID.
-    #[serde(default)]
-    pub blocker_refs: Vec<String>,
-    /// `parent` rendered as an alias, for the same reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_ref: Option<String>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-// ---------------------------------------------------------------------------
-// Config (`store.json`)
-// ---------------------------------------------------------------------------
-
-/// On-disk layout version. v1 requires exactly this.
-pub const FORMAT: i64 = 2;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConfigDefaults {
-    #[serde(default = "default_priority")]
-    pub priority: Priority,
-    #[serde(default, deserialize_with = "null_vec")]
-    pub labels: Vec<String>,
-}
-
-fn default_priority() -> Priority {
-    Priority::Medium
-}
-
-impl Default for ConfigDefaults {
-    fn default() -> Self {
+impl Entry {
+    pub fn new(r#ref: String, title: String, created: String) -> Self {
         Self {
-            priority: Priority::Medium,
+            r#ref,
+            title,
+            state: State::Open,
             labels: Vec::new(),
+            created: created.clone(),
+            updated: created,
+            done: None,
+            blocked_by: Vec::new(),
+            status: None,
+            acceptance: Vec::new(),
+            log: Vec::new(),
+            extra: serde_json::Map::new(),
         }
     }
 }
 
-/// `clean_after` is either a day count or `false` (disabled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CleanAfter {
-    pub enabled: bool,
-    pub days: i64,
+/// An entry plus what a reader needs to know about its references.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryView {
+    #[serde(flatten)]
+    pub entry: Entry,
+    /// Content fingerprint of the document as read, for `--if-rev`.
+    pub rev: String,
+    /// Blockers naming no entry in the store. Unresolved counts as blocking,
+    /// never as done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_blockers: Vec<String>,
+    /// Blockers that are still in the way: unresolved ones, and ones whose entry
+    /// is still open. A blocker that is done or dropped is no longer a blocker,
+    /// which is what makes `ready` mean "can be started now".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<String>,
+    /// The file this entry lives in.
+    pub file: String,
 }
 
-impl Serialize for CleanAfter {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if self.enabled {
-            s.serialize_i64(self.days)
-        } else {
-            s.serialize_bool(false)
-        }
+impl EntryView {
+    /// Waiting: something it names is unfinished. True even for a done entry
+    /// that still names an open blocker, which is why display and filters ask
+    /// [`Self::is_waiting`] instead.
+    pub fn is_blocked(&self) -> bool {
+        !self.blocking.is_empty()
+    }
+
+    /// Blocked *and* still to do, which is what a `blocked` marker means: a
+    /// finished entry is not waiting on anything.
+    pub fn is_waiting(&self) -> bool {
+        self.entry.state == State::Open && self.is_blocked()
+    }
+    pub fn is_ready(&self) -> bool {
+        self.entry.state == State::Open && !self.is_blocked()
     }
 }
 
-impl<'de> Deserialize<'de> for CleanAfter {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Bool(bool),
-            Days(i64),
-        }
-        match Raw::deserialize(d)? {
-            Raw::Bool(false) => Ok(Self {
-                enabled: false,
-                days: 0,
-            }),
-            Raw::Bool(true) => Ok(Self {
-                enabled: true,
-                days: 14,
-            }),
-            Raw::Days(n) => Ok(Self {
-                enabled: true,
-                days: n,
-            }),
-        }
-    }
-}
-
-/// `.tasks/store.json`. Carries the format gate that keeps a v1 binary from
-/// interpreting a v0 store (`config.json` + one JSON file per task).
+/// The settings in `.tk.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    /// On-disk layout version; [`FORMAT`] for this binary.
+    /// On-disk layout version; this binary reads and writes [`crate::store::FORMAT`].
     pub format: i64,
-    #[serde(default = "default_version")]
-    pub version: i64,
-    #[serde(default = "default_project")]
-    pub project: String,
-    #[serde(default)]
-    pub defaults: ConfigDefaults,
-    #[serde(default = "default_clean_after")]
-    pub clean_after: CleanAfter,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aliases: Option<BTreeMap<String, String>>,
-}
-
-fn default_version() -> i64 {
-    1
-}
-fn default_project() -> String {
-    "tk".to_owned()
-}
-fn default_clean_after() -> CleanAfter {
-    CleanAfter {
-        enabled: true,
-        days: 14,
-    }
+    pub aliases: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            format: FORMAT,
-            version: 1,
-            project: "tk".to_owned(),
-            defaults: ConfigDefaults::default(),
-            clean_after: CleanAfter {
-                enabled: true,
-                days: 14,
-            },
+            format: crate::store::FORMAT,
             aliases: None,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Error)]
 pub enum ModelError {
-    #[error("invalid status {0:?}: use open, active, deferred, done, or closed")]
-    BadStatus(String),
-    #[error("invalid priority {0:?}: use 0-4, p0-p4, or none/urgent/high/medium/low")]
-    BadPriority(String),
+    #[error("invalid state {0:?}: use open, done, or dropped")]
+    BadState(String),
 }
 
-impl miette::Diagnostic for ModelError {}
+impl miette::Diagnostic for ModelError {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        Some(Box::new(crate::output::code::INVALID_INPUT))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn sample() -> Entry {
+        Entry {
+            r#ref: "a7b3".into(),
+            title: "Rewrite the auth layer".into(),
+            state: State::Open,
+            labels: vec!["backend".into()],
+            created: "2026-01-10T12:00:00Z".into(),
+            updated: "2026-02-01T09:30:00Z".into(),
+            done: None,
+            blocked_by: vec!["b7c4".into()],
+            status: Some("Halfway".into()),
+            acceptance: vec!["parity test passes".into()],
+            log: vec![LogEntry {
+                ts: "2026-01-10T09:00:00Z".into(),
+                msg: "Started with the JWT approach.".into(),
+            }],
+            extra: serde_json::Map::new(),
+        }
+    }
+
     #[test]
-    fn status_round_trip_and_legacy() {
-        assert_eq!(Status::parse("OPEN").unwrap(), Status::Open);
-        assert_eq!(Status::parse("cancelled").unwrap(), Status::Closed);
-        assert!(Status::parse("bogus").is_err());
-        assert!(Status::Done.is_terminal());
-        assert!(!Status::Active.is_terminal());
+    fn states_parse_including_legacy_names() {
+        assert_eq!(State::parse("open").unwrap(), State::Open);
+        assert_eq!(State::parse("DONE").unwrap(), State::Done);
+        assert_eq!(State::parse("dropped").unwrap(), State::Dropped);
+        // Names from older layouts still read.
+        assert_eq!(State::parse("closed").unwrap(), State::Dropped);
+        assert_eq!(State::parse("cancelled").unwrap(), State::Dropped);
+        assert!(State::parse("active").is_err(), "active is not a state");
+        assert!(State::parse("deferred").is_err());
+        assert!(State::parse("").is_err());
+    }
+
+    #[test]
+    fn the_document_has_one_shape() {
+        let json = serde_json::to_string_pretty(&sample()).unwrap();
+        // Every field a reader may look for is present, even when empty.
+        for key in [
+            "ref",
+            "title",
+            "state",
+            "labels",
+            "created",
+            "updated",
+            "done",
+            "blocked_by",
+            "status",
+            "acceptance",
+            "log",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "{key} missing from {json}"
+            );
+        }
+        // Top-level keys only: nested keys and values sit at a deeper indent.
+        let keys: Vec<&str> = json
+            .lines()
+            .filter_map(|line| line.strip_prefix("  \""))
+            .filter_map(|line| line.split('"').next())
+            .collect();
         assert_eq!(
-            serde_json::to_string(&Status::Active).unwrap(),
-            r#""active""#
+            keys,
+            vec![
+                "ref",
+                "title",
+                "state",
+                "labels",
+                "created",
+                "updated",
+                "done",
+                "blocked_by",
+                "status",
+                "acceptance",
+                "log"
+            ],
+            "key order is the file's shape"
         );
-        let s: Status = serde_json::from_str(r#""cancelled""#).unwrap();
-        assert_eq!(s, Status::Closed);
+        assert_eq!(serde_json::from_str::<Entry>(&json).unwrap(), sample());
     }
 
     #[test]
-    fn priority_forms() {
-        assert_eq!(Priority::parse("1").unwrap(), Priority::Urgent);
-        assert_eq!(Priority::parse("p2").unwrap(), Priority::High);
-        assert_eq!(Priority::parse("low").unwrap(), Priority::Low);
-        assert!(Priority::parse("9").is_err());
-        assert_eq!(Priority::Urgent.short(), "p1");
-        assert!(Priority::None.sort_key() > Priority::Low.sort_key());
+    fn an_entry_with_nothing_optional_still_reads_and_writes() {
+        let minimal = serde_json::json!({
+            "ref": "a7b3",
+            "title": "t",
+            "state": "open",
+            "labels": [],
+            "created": "c",
+            "updated": "u",
+            "done": null,
+            "blocked_by": null,
+            "acceptance": null,
+            "log": null
+        });
+        let entry: Entry = serde_json::from_value(minimal).unwrap();
+        assert!(entry.blocked_by.is_empty());
+        assert!(entry.log.is_empty());
+        assert!(entry.status.is_none());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("status"),
+            "an unset status is omitted: {json}"
+        );
     }
 
     #[test]
-    fn legacy_log_strings() {
-        let e = parse_legacy_log("2026-01-10: did a thing");
-        assert_eq!(e.ts, "2026-01-10");
-        assert_eq!(e.msg, "did a thing");
-        let e = parse_legacy_log("just a note");
-        assert_eq!(e.msg, "just a note");
+    fn closed_entries_and_readiness() {
+        assert!(State::Done.is_closed());
+        assert!(State::Dropped.is_closed());
+        assert!(!State::Open.is_closed());
+
+        let view = EntryView {
+            entry: sample(),
+            rev: "abc".into(),
+            unresolved_blockers: vec!["b7c4".into()],
+            blocking: vec!["b7c4".into()],
+            file: "a7b3-rewrite-the-auth-layer.json".into(),
+        };
+        assert!(view.is_blocked());
+        assert!(view.is_waiting());
+        assert!(!view.is_ready(), "a blocked entry is never ready");
+
+        let mut done = view.clone();
+        done.entry.state = State::Done;
+        assert!(done.is_blocked(), "it still names an unfinished blocker");
+        assert!(!done.is_waiting(), "but it is not waiting on anything");
+        assert!(!done.is_ready());
     }
 
     #[test]
-    fn clean_after_shapes() {
-        let c: CleanAfter = serde_json::from_str("false").unwrap();
-        assert!(!c.enabled);
-        let c: CleanAfter = serde_json::from_str("14").unwrap();
-        assert!(c.enabled && c.days == 14);
-        assert_eq!(serde_json::to_string(&c).unwrap(), "14");
-    }
-
-    fn created_json() -> &'static str {
-        r#"{"id":"01j8x0m5r7000000000000000a","alias":"a7b3","project":"tk",
-            "title":"t","status":"open","priority":3,"created_at":"x","updated_at":"y"}"#
-    }
-
-    #[test]
-    fn explicit_nulls_and_missing_fields_read_as_empty() {
-        let s: TaskState = serde_json::from_str(
-            r#"{"id":"01j8x0m5r7000000000000000a","alias":"a7b3","project":"tk",
-                "title":"t","status":"open","priority":3,"labels":null,
-                "blocked_by":null,"logs":null,"links":null,
-                "created_at":"x","updated_at":"y"}"#,
-        )
-        .unwrap();
-        assert!(s.labels.is_empty());
-        assert!(s.blocked_by.is_empty());
-        assert!(s.logs.is_empty());
-        assert!(s.links.is_empty());
-        assert!(s.legacy_aliases.is_empty());
-        assert!(!s.is_archived());
-    }
-
-    #[test]
-    fn round_trip_keeps_the_list_fields() {
-        let s: TaskState = serde_json::from_str(created_json()).unwrap();
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains(r#""links":[]"#), "{json}");
-        assert!(json.contains(r#""blocked_by":[]"#), "{json}");
-        assert!(!json.contains("checkpoint"), "{json}");
-        let back: TaskState = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, back);
-    }
-
-    #[test]
-    fn a_field_from_a_future_writer_is_ignored_not_fatal() {
-        // Forward compatibility is what makes reserved fields unnecessary: a
-        // newer writer's field or event is additive, and this reader ignores
-        // it rather than failing.
-        let raw = created_json().replace("}", r#","assignee":"nick","future_field":42}"#);
-        let s: TaskState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(s.alias, "a7b3");
-    }
-
-    #[test]
-    fn config_requires_a_format_and_defaults_to_the_current_one() {
-        let c: Config = serde_json::from_str(r#"{"format":2,"project":"demo"}"#).unwrap();
-        assert_eq!(c.format, FORMAT);
-        assert_eq!(c.project, "demo");
-        assert!(c.clean_after.enabled);
-        // A v0 config has no `format`: reading it as a v1 config must fail.
-        assert!(serde_json::from_str::<Config>(r#"{"version":1,"project":"demo"}"#).is_err());
+    fn unknown_fields_are_preserved_not_dropped() {
+        // A field a human or a newer writer added survives a read/write cycle,
+        // which is what makes reserved fields unnecessary.
+        let raw = serde_json::json!({
+            "ref": "a7b3", "title": "t", "state": "open", "labels": [], "created": "c",
+            "updated": "u", "done": null, "blocked_by": [], "acceptance": [], "log": [],
+            "assignee": "nick", "future_field": 42
+        });
+        let entry: Entry = serde_json::from_value(raw).unwrap();
+        assert_eq!(entry.r#ref, "a7b3");
+        assert_eq!(
+            entry.extra.get("assignee").and_then(|v| v.as_str()),
+            Some("nick")
+        );
+        let round_tripped = serde_json::to_value(&entry).unwrap();
+        assert_eq!(round_tripped["future_field"], serde_json::json!(42));
     }
 }

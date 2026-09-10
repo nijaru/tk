@@ -1,539 +1,868 @@
-//! Task operations: one implementation per change, shared by the CLI and `tk apply`.
+//! Operations: the one implementation of everything tk does to an entry.
 //!
-//! A command is resolve → call → emit. `apply` is a dispatcher over the same
-//! functions, so the two paths cannot drift apart.
+//! Commands resolve a ref, call one operation, and print what it returns;
+//! `apply` calls the same functions. There is deliberately no second path,
+//! because v1 had one and the two drifted — the multi-field edit ordered its
+//! writes differently in the two implementations, and only a test that ran both
+//! and compared the results caught it.
 //!
-//! [`Mutation`] carries the lock decision. `Mutation::free` is reads plus
-//! appends that are last-writer-wins or commutative; `Mutation::locked` holds
-//! the store lock and is required by anything that must see a consistent store.
-//! Operations that need the lock say so by asking for it, so forgetting it is a
-//! loud internal error rather than a silent race.
+//! v1 split operations into lock-free (append) and locked (read-then-write).
+//! That distinction is gone: with one document per entry, every change is a
+//! whole-file rewrite and every one of them takes the store lock, so an enum
+//! with one meaningful arm would be decoration. Every function here takes a
+//! [`Txn`], and a `Txn` cannot be constructed without the lock.
 
-use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::ids;
-use crate::model::{LogEntry, Priority, Status, TaskState, TaskView};
-use crate::record::{Record, op};
-use crate::store::{CreateOptions, Ctx, Store, StoreError, Txn};
+use crate::model::{Entry, EntryView, LogEntry, State};
+use crate::store::{Result, StoreError, Txn};
 
-/// A mutation handle over one store.
-pub struct Mutation<'a> {
-    store: Store<'a>,
-    txn: Option<Txn<'a>>,
+/// One entry, resolved and loaded, that an operation is about to change.
+struct Change {
+    r#ref: String,
+    path: PathBuf,
+    entry: Entry,
+    /// A new slug, when the operation is renaming the file.
+    slug: Option<String>,
 }
 
-impl<'a> Mutation<'a> {
-    /// No lock. Only for reads and for appends that do not depend on a read of
-    /// the same record.
-    pub fn free(ctx: &'a Ctx) -> Result<Self, StoreError> {
+impl Change {
+    /// Resolve, check the caller's revision, load.
+    fn open(txn: &Txn<'_>, input: &str, rev: Option<&str>) -> Result<Self> {
+        let r#ref = txn.resolve(input)?;
+        txn.store().check_rev(&r#ref, rev)?;
+        let (path, entry) = txn.load(&r#ref)?;
         Ok(Self {
-            store: ctx.store()?,
-            txn: None,
+            r#ref,
+            path,
+            entry,
+            slug: None,
         })
     }
 
-    /// Holds `<store>/.lock` for the life of the mutation.
-    pub fn locked(ctx: &'a Ctx) -> Result<Self, StoreError> {
-        let txn = ctx.txn()?;
-        let store = Store::new(txn.ctx());
-        Ok(Self {
-            store,
-            txn: Some(txn),
-        })
-    }
-
-    /// Pick the cheapest handle that is still correct.
-    ///
-    /// Callers pass the *reason* they might need the lock (a conditional write,
-    /// a graph check, a replacement computed from a read), so the decision lives
-    /// with the operation that has the reason rather than in a convention.
-    pub fn choose(ctx: &'a Ctx, needs_lock: bool) -> Result<Self, StoreError> {
-        if needs_lock {
-            Self::locked(ctx)
-        } else {
-            Self::free(ctx)
-        }
-    }
-
-    pub fn store(&self) -> &Store<'a> {
-        &self.store
-    }
-
-    fn locked_txn(&self, what: &str) -> Result<&Txn<'a>, StoreError> {
-        self.txn.as_ref().ok_or_else(|| {
-            StoreError::Msg(format!(
-                "internal error: {what} requires the store lock; this is a bug in tk"
-            ))
-        })
-    }
-
-    /// Reject the operation unless the record still carries `expected`.
-    pub fn check_rev(&self, id: &str, expected: Option<&str>) -> Result<(), StoreError> {
-        match expected {
-            None => Ok(()),
-            Some(_) => self
-                .locked_txn("a conditional write")?
-                .check_rev(id, expected),
-        }
-    }
-
-    pub fn load(&self, id: &str) -> Result<Record, StoreError> {
-        self.store.load(id)
-    }
-
-    pub fn view(&self, id: &str) -> Result<TaskView, StoreError> {
-        self.store.view_of(id)
-    }
-
-    fn append(&self, id: &str, op_name: &str, data: Value) -> Result<(), StoreError> {
-        self.store.append(id, op_name, data)
-    }
-
-    fn append_and_view(
-        &self,
-        id: &str,
-        op_name: &str,
-        data: Value,
-    ) -> Result<TaskView, StoreError> {
-        self.store.append_and_view(id, op_name, data)
+    /// Stamp and write. The one place a mutation reaches the disk.
+    fn save(&mut self, txn: &Txn<'_>, now: &str) -> Result<EntryView> {
+        Txn::touch(&mut self.entry, now);
+        let path = match &self.slug {
+            Some(slug) => txn.write_as(&self.entry, slug, Some(&self.path))?,
+            None => txn.write(&self.entry, Some(&self.path))?,
+        };
+        let known = txn.known()?;
+        Ok(crate::store::view_of(
+            &self.entry,
+            &crate::store::file_name(&path),
+            &known,
+        ))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Create and single-value fields
-// ---------------------------------------------------------------------------
-
-/// Create a task. Locked: alias uniqueness is store-wide.
-pub fn create(m: &Mutation<'_>, opts: CreateOptions) -> Result<TaskView, StoreError> {
-    m.locked_txn("creating a task")?.create(opts)
-}
-
-pub fn set_title(
-    m: &Mutation<'_>,
-    id: &str,
-    title: String,
-    if_rev: Option<&str>,
-) -> Result<TaskView, StoreError> {
-    m.check_rev(id, if_rev)?;
-    m.append_and_view(id, op::TITLE, Value::from(title))
-}
-
-pub fn set_description(
-    m: &Mutation<'_>,
-    id: &str,
-    description: Option<String>,
-    if_rev: Option<&str>,
-) -> Result<TaskView, StoreError> {
-    m.check_rev(id, if_rev)?;
-    m.append_and_view(id, op::DESCRIPTION, serde_json::json!(description))
-}
-
-pub fn set_priority(
-    m: &Mutation<'_>,
-    id: &str,
-    priority: Priority,
-) -> Result<TaskView, StoreError> {
-    m.append_and_view(id, op::PRIORITY, serde_json::json!(priority as u8))
-}
-
-/// Set workflow status. Last writer wins; completion time is derived by the
-/// fold from the transition, so it cannot disagree with the status.
-pub fn set_status(m: &Mutation<'_>, id: &str, status: Status) -> Result<TaskView, StoreError> {
-    m.append_and_view(id, op::STATUS, serde_json::json!(status))
-}
-
-/// Change the display project. Identity is untouched, so no reference anywhere
-/// needs rewriting.
-pub fn set_project(m: &Mutation<'_>, id: &str, project: &str) -> Result<TaskView, StoreError> {
-    ids::validate_project(project)?;
-    m.append_and_view(id, op::PROJECT, serde_json::json!(project))
-}
-
-/// Replace or clear the current checkpoint.
-pub fn set_checkpoint(
-    m: &Mutation<'_>,
-    id: &str,
-    text: Option<String>,
-    if_rev: Option<&str>,
-) -> Result<TaskView, StoreError> {
-    m.check_rev(id, if_rev)?;
-    let text = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
-    m.append_and_view(id, op::CHECKPOINT, serde_json::json!(text))
-}
-
-pub fn add_log(m: &Mutation<'_>, id: &str, msg: &str) -> Result<TaskView, StoreError> {
-    let entry = LogEntry {
-        ts: String::new(),
-        msg: msg.to_owned(),
-    };
-    let data = serde_json::to_value(&entry)
-        .map_err(|e| StoreError::InvalidInput(format!("log entry: {e}")))?;
-    m.append_and_view(id, op::LOG, data)
-}
-
-// ---------------------------------------------------------------------------
-// Multi-field edit
-// ---------------------------------------------------------------------------
-
-/// A multi-field edit: what `tk edit` and `{"op":"edit"}` both express.
+/// Resolve a ref and refuse a stale revision, before a write.
 ///
-/// One struct so the two paths cannot apply the fields in different orders or
-/// forget one when a field is added.
+/// Callers use this inside a transaction, so nothing can change between the
+/// check and the write it protects.
+pub fn resolve_rev(txn: &Txn<'_>, input: &str, rev: Option<&str>) -> Result<String> {
+    let r#ref = txn.resolve(input)?;
+    txn.store().check_rev(&r#ref, rev)?;
+    Ok(r#ref)
+}
+
+/// Start a new entry.
+pub fn create(txn: &Txn<'_>, title: &str, now: &str) -> Result<EntryView> {
+    txn.create(title, now)
+}
+
+/// Replace the title. The file does not move: the slug is a creation-time
+/// mnemonic, not a function of the title.
+pub fn set_title(txn: &Txn<'_>, input: &str, title: &str, now: &str) -> Result<EntryView> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(StoreError::EmptyTitle);
+    }
+    let mut change = Change::open(txn, input, None)?;
+    change.entry.title = title.to_owned();
+    change.save(txn, now)
+}
+
+/// Move the file to a new slug, keeping the ref.
+pub fn set_slug(txn: &Txn<'_>, input: &str, slug: &str, now: &str) -> Result<EntryView> {
+    let slug = ids::slug(slug);
+    let mut change = Change::open(txn, input, None)?;
+    change.slug = Some(slug);
+    change.save(txn, now)
+}
+
+/// Replace the current status; `None` clears it.
+///
+/// The status is the replaceable summary — where things stand now. The log is
+/// the history, and it is appended to, never rewritten.
+pub fn set_status(txn: &Txn<'_>, input: &str, text: Option<&str>, now: &str) -> Result<EntryView> {
+    let mut change = Change::open(txn, input, None)?;
+    change.entry.status = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    change.save(txn, now)
+}
+
+/// Append one log entry.
+pub fn add_log(txn: &Txn<'_>, input: &str, msg: &str, now: &str) -> Result<EntryView> {
+    let msg = msg.trim();
+    if msg.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "a log entry needs a message".into(),
+        ));
+    }
+    let mut change = Change::open(txn, input, None)?;
+    change.entry.log.push(LogEntry {
+        ts: now.to_owned(),
+        msg: msg.to_owned(),
+    });
+    change.save(txn, now)
+}
+
+/// Move to a state. Closing stamps the moment; reopening forgets it, because a
+/// reopened entry is not done and a stale timestamp would say it was.
+pub fn set_state(txn: &Txn<'_>, input: &str, state: State, now: &str) -> Result<EntryView> {
+    let mut change = Change::open(txn, input, None)?;
+    change.entry.state = state;
+    change.entry.done = if state.is_closed() {
+        Some(now.to_owned())
+    } else {
+        None
+    };
+    change.save(txn, now)
+}
+
+/// Apply `+add`, `-remove`, or bare-replace label changes.
+///
+/// A bare label (`tk label a7b3 urgent`) replaces the whole set, which is the
+/// only kind of change that can lose a concurrent `+x`: it writes a set that was
+/// read before the other writer's change landed. Deltas are the safe form, and
+/// they are what the help text recommends for more than one agent.
+pub fn edit_labels(txn: &Txn<'_>, input: &str, changes: &[String], now: &str) -> Result<EntryView> {
+    if changes.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "no labels given: use +tag, -tag, or a bare tag to replace the set".into(),
+        ));
+    }
+    let mut change = Change::open(txn, input, None)?;
+    apply_label_changes(&mut change.entry.labels, changes);
+    change.save(txn, now)
+}
+
+/// Fold label changes into a set: bare values replace, `+`/`-` adjust.
+fn apply_label_changes(current: &mut Vec<String>, changes: &[String]) {
+    let bare: Vec<String> = changes
+        .iter()
+        .filter(|c| !c.starts_with(['+', '-']))
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if !bare.is_empty() {
+        current.clear();
+        current.extend(bare);
+    }
+    for change in changes {
+        if let Some(add) = change.strip_prefix('+') {
+            current.push(add.trim().to_owned());
+        } else if let Some(remove) = change.strip_prefix('-')
+            && !remove.trim().is_empty()
+        {
+            let remove = remove.trim();
+            current.retain(|l| !l.eq_ignore_ascii_case(remove));
+        }
+    }
+    normalize_labels(current);
+}
+
+/// Lowercase, drop blanks and duplicates, sort: one spelling per label, so
+/// filtering and counting are unambiguous.
+fn normalize_labels(labels: &mut Vec<String>) {
+    labels.retain(|l| !l.trim().is_empty());
+    for label in labels.iter_mut() {
+        *label = label.trim().to_lowercase();
+    }
+    labels.sort();
+    labels.dedup();
+}
+
+/// Replace the whole blocker set.
+pub fn set_blocked_by(txn: &Txn<'_>, input: &str, refs: &[String], now: &str) -> Result<EntryView> {
+    let mut change = Change::open(txn, input, None)?;
+    let resolved = resolve_blockers(txn, &change.r#ref, refs)?;
+    change.entry.blocked_by = resolved;
+    change.save(txn, now)
+}
+
+/// Add one blocker, refusing a loop.
+pub fn add_blocker(txn: &Txn<'_>, input: &str, blocker: &str, now: &str) -> Result<EntryView> {
+    let mut change = Change::open(txn, input, None)?;
+    let blocker_ref = resolve_blocker(txn, &change.r#ref, blocker)?;
+    if !change.entry.blocked_by.contains(&blocker_ref) {
+        change.entry.blocked_by.push(blocker_ref);
+        change.entry.blocked_by.sort();
+    }
+    change.save(txn, now)
+}
+
+/// Remove one blocker. `false` means it was not blocking.
+pub fn remove_blocker(txn: &Txn<'_>, input: &str, blocker: &str, now: &str) -> Result<EntryView> {
+    let mut change = Change::open(txn, input, None)?;
+    let blocker_ref = txn.resolve(blocker)?;
+    change.entry.blocked_by.retain(|b| b != &blocker_ref);
+    change.save(txn, now)
+}
+
+fn resolve_blockers(txn: &Txn<'_>, own: &str, refs: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for r#ref in refs {
+        let resolved = resolve_blocker(txn, own, r#ref)?;
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Resolve a blocker and refuse anything that would close a loop.
+///
+/// An unresolved name is an error rather than a dropped reference: a blocker
+/// that silently vanishes is a task that silently becomes ready.
+fn resolve_blocker(txn: &Txn<'_>, own: &str, blocker: &str) -> Result<String> {
+    let blocker_ref = txn.resolve(blocker)?;
+    if blocker_ref == own {
+        return Err(StoreError::WouldCycle {
+            blocked: own.to_owned(),
+            path: format!("{own} -> {own}"),
+        });
+    }
+    if let Some(path) = would_cycle(txn, own, &blocker_ref)? {
+        return Err(StoreError::WouldCycle {
+            blocked: own.to_owned(),
+            path,
+        });
+    }
+    Ok(blocker_ref)
+}
+
+/// Walk `blocker`'s own blockers looking for `own`. Returns the loop, for the
+/// message, rather than a bare yes.
+fn would_cycle(txn: &Txn<'_>, own: &str, blocker: &str) -> Result<Option<String>> {
+    let mut seen: Vec<String> = vec![blocker.to_owned()];
+    let mut stack = vec![blocker.to_owned()];
+    while let Some(current) = stack.pop() {
+        if current == own {
+            seen.push(current);
+            return Ok(Some(seen.join(" -> ")));
+        }
+        let Ok((_, entry)) = txn.load(&current) else {
+            continue;
+        };
+        for next in &entry.blocked_by {
+            if !seen.contains(next) {
+                seen.push(next.clone());
+                stack.push(next.clone());
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Acceptance criteria: what must be true for this to count as done.
+#[derive(Debug, Default, Clone)]
+pub struct AcceptanceChange {
+    /// Replace the whole list.
+    pub set: Option<Vec<String>>,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    /// Drop every criterion.
+    pub clear: bool,
+}
+
+impl AcceptanceChange {
+    pub fn is_empty(&self) -> bool {
+        self.set.is_none() && self.add.is_empty() && self.remove.is_empty() && !self.clear
+    }
+}
+
+/// Change acceptance criteria in one write.
+pub fn edit_acceptance(
+    txn: &Txn<'_>,
+    input: &str,
+    change: &AcceptanceChange,
+    now: &str,
+) -> Result<EntryView> {
+    if change.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "nothing to accept: give a criterion, --remove, --set, or --clear".into(),
+        ));
+    }
+    let mut entry_change = Change::open(txn, input, None)?;
+    let items = &mut entry_change.entry.acceptance;
+    if change.clear {
+        items.clear();
+    }
+    if let Some(set) = &change.set {
+        *items = trim_all(set);
+    }
+    for item in &change.add {
+        items.push(item.trim().to_owned());
+    }
+    for item in &change.remove {
+        let item = item.trim();
+        items.retain(|existing| !existing.eq_ignore_ascii_case(item));
+    }
+    items.retain(|item| !item.is_empty());
+    dedupe_preserving_order(items);
+    entry_change.save(txn, now)
+}
+
+fn trim_all(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|i| i.trim().to_owned())
+        .filter(|i| !i.is_empty())
+        .collect()
+}
+
+fn dedupe_preserving_order(items: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    items.retain(|item| {
+        let key = item.to_lowercase();
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.push(key);
+            true
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The multi-field edit
+// ---------------------------------------------------------------------------
+
+/// Everything `tk edit` and `apply`'s `edit` intent can change, in one write.
 #[derive(Debug, Default, Clone)]
 pub struct Edit {
     pub title: Option<String>,
-    /// `None` leaves the description; `Some(None)` clears it.
-    pub description: Option<Option<String>>,
-    pub priority: Option<Priority>,
-    /// `None` leaves the parent; `Some(None)` clears it; `Some(Some(r))` sets it
-    /// from a reference, which is resolved here.
-    pub parent: Option<Option<String>>,
-    /// As the CLI accepts them: `+x` adds, `-x` removes, a bare value replaces.
-    pub labels: Vec<String>,
+    pub slug: Option<String>,
+    /// `Some(None)` clears the status.
+    pub status: Option<Option<String>>,
+    pub labels: Option<Vec<String>>,
+    pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
-    pub if_rev: Option<String>,
+    pub acceptance: AcceptanceChange,
+    pub blockers: Option<Vec<String>>,
+    pub add_blockers: Vec<String>,
+    pub remove_blockers: Vec<String>,
+    /// Append one log entry along with the rest.
+    pub note: Option<String>,
 }
 
 impl Edit {
-    /// Does this edit need the store lock?
-    ///
-    /// A parent change validates other records, a bare label value is a
-    /// read-modify-write, and `--if-rev` must compare and write together.
-    pub fn needs_lock(&self) -> bool {
-        self.if_rev.is_some()
-            || self.parent.is_some()
-            || self.labels.iter().any(|v| !v.starts_with(['+', '-']))
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.slug.is_none()
+            && self.status.is_none()
+            && self.labels.is_none()
+            && self.add_labels.is_empty()
+            && self.remove_labels.is_empty()
+            && self.acceptance.is_empty()
+            && self.blockers.is_none()
+            && self.add_blockers.is_empty()
+            && self.remove_blockers.is_empty()
+            && self.note.is_none()
+    }
+
+    /// Merge label changes into one delta list, in a fixed order.
+    fn label_changes(&self) -> Vec<String> {
+        let mut changes = Vec::new();
+        if let Some(labels) = &self.labels {
+            changes.extend(labels.iter().cloned());
+        }
+        changes.extend(self.add_labels.iter().map(|l| format!("+{l}")));
+        changes.extend(self.remove_labels.iter().map(|l| format!("-{l}")));
+        changes
     }
 }
 
-/// Apply a multi-field edit in a fixed order.
+/// Apply every requested change in a single write.
 ///
-pub fn apply_edit(m: &Mutation<'_>, id: &str, edit: &Edit) -> Result<TaskView, StoreError> {
-    // One conditional check for the whole edit. Checking per field would reject
-    // the second field of a legitimate edit, because the first already moved the
-    // revision; the caller holds the lock throughout, so one check still means
-    // "nothing changed since I read it".
-    m.check_rev(id, edit.if_rev.as_deref())?;
+/// One `Change`, one `save`: the fields cannot disagree about what they were
+/// read from, and the file is rewritten once rather than once per field.
+pub fn apply_edit(txn: &Txn<'_>, input: &str, edit: &Edit, now: &str) -> Result<EntryView> {
+    if edit.is_empty() {
+        return Err(StoreError::InvalidInput("nothing to change".into()));
+    }
+    if let Some(title) = &edit.title
+        && title.trim().is_empty()
+    {
+        return Err(StoreError::EmptyTitle);
+    }
 
+    let mut change = Change::open(txn, input, None)?;
     if let Some(title) = &edit.title {
-        set_title(m, id, title.clone(), None)?;
+        change.entry.title = title.trim().to_owned();
     }
-    if let Some(description) = &edit.description {
-        set_description(m, id, description.clone(), None)?;
+    if let Some(slug) = &edit.slug {
+        change.slug = Some(ids::slug(slug));
     }
-    if let Some(priority) = edit.priority {
-        set_priority(m, id, priority)?;
+    if let Some(status) = &edit.status {
+        change.entry.status = status
+            .as_ref()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
     }
-    if let Some(parent) = &edit.parent {
-        match parent {
-            None => {
-                set_parent(m, id, None)?;
+    let label_changes = edit.label_changes();
+    if !label_changes.is_empty() {
+        apply_label_changes(&mut change.entry.labels, &label_changes);
+    }
+
+    // Acceptance and blockers are resolved before anything is written, so a bad
+    // reference fails the whole edit rather than leaving half of it applied.
+    let acceptance = resolve_acceptance(&change.entry, &edit.acceptance);
+    let blockers = match (
+        &edit.blockers,
+        edit.add_blockers.is_empty(),
+        edit.remove_blockers.is_empty(),
+    ) {
+        (Some(refs), _, _) => Some(resolve_blockers(txn, &change.r#ref, refs)?),
+        (None, false, _) => {
+            let mut current = change.entry.blocked_by.clone();
+            for blocker in &edit.add_blockers {
+                let resolved = resolve_blocker(txn, &change.r#ref, blocker)?;
+                if !current.contains(&resolved) {
+                    current.push(resolved);
+                }
             }
-            Some(reference) => {
-                let pid = m.store().resolve(reference)?;
-                set_parent(m, id, Some(&pid))?;
-            }
+            current.sort();
+            Some(current)
         }
+        (None, true, false) => {
+            let mut current = change.entry.blocked_by.clone();
+            for blocker in &edit.remove_blockers {
+                let resolved = txn.resolve(blocker)?;
+                current.retain(|b| b != &resolved);
+            }
+            Some(current)
+        }
+        (None, true, true) => None,
+    };
+
+    change.entry.acceptance = acceptance;
+    if let Some(blockers) = blockers {
+        change.entry.blocked_by = blockers;
     }
-    let mut labels = edit.labels.clone();
-    labels.extend(edit.remove_labels.iter().map(|l| format!("-{l}")));
-    edit_list(m, id, ListField::Labels, ListEdit::Deltas(&labels), None)
+    if let Some(note) = &edit.note {
+        let note = note.trim();
+        if note.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "a log entry needs a message".into(),
+            ));
+        }
+        change.entry.log.push(LogEntry {
+            ts: now.to_owned(),
+            msg: note.to_owned(),
+        });
+    }
+    change.save(txn, now)
+}
+
+fn resolve_acceptance(entry: &Entry, change: &AcceptanceChange) -> Vec<String> {
+    let mut items = entry.acceptance.clone();
+    if change.clear {
+        items.clear();
+    }
+    if let Some(set) = &change.set {
+        items = trim_all(set);
+    }
+    for item in &change.add {
+        items.push(item.trim().to_owned());
+    }
+    for item in &change.remove {
+        let item = item.trim();
+        items.retain(|existing| !existing.eq_ignore_ascii_case(item));
+    }
+    items.retain(|item| !item.is_empty());
+    dedupe_preserving_order(&mut items);
+    items
 }
 
 // ---------------------------------------------------------------------------
-// List-valued fields
+// Purge
 // ---------------------------------------------------------------------------
 
-/// One list-valued field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListField {
-    Labels,
-    Links,
-    Acceptance,
-    Evidence,
+/// What a purge removed, and what it unblocked.
+#[derive(Debug, serde::Serialize)]
+pub struct Purge {
+    pub deleted: EntryView,
+    /// Entries that were blocked by the deleted one, now unblocked.
+    pub unblocked: Vec<String>,
 }
 
-impl ListField {
-    /// The field's name, as the user sees it.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Labels => "labels",
-            Self::Links => "links",
-            Self::Acceptance => "acceptance",
-            Self::Evidence => "evidence",
-        }
-    }
-
-    pub fn values(self, state: &TaskState) -> &[String] {
-        match self {
-            Self::Labels => &state.labels,
-            Self::Links => &state.links,
-            Self::Acceptance => &state.acceptance,
-            Self::Evidence => &state.evidence,
-        }
-    }
-
-    fn add_op(self) -> &'static str {
-        match self {
-            Self::Labels => op::LABELS_ADD,
-            Self::Links => op::LINKS_ADD,
-            Self::Acceptance => op::ACCEPTANCE_ADD,
-            Self::Evidence => op::EVIDENCE_ADD,
-        }
-    }
-
-    fn remove_op(self) -> &'static str {
-        match self {
-            Self::Labels => op::LABELS_REMOVE,
-            Self::Links => op::LINKS_REMOVE,
-            Self::Acceptance => op::ACCEPTANCE_REMOVE,
-            Self::Evidence => op::EVIDENCE_REMOVE,
-        }
-    }
-
-    fn set_op(self) -> &'static str {
-        match self {
-            Self::Labels => op::LABELS_SET,
-            Self::Links => op::LINKS_SET,
-            Self::Acceptance => op::ACCEPTANCE_SET,
-            Self::Evidence => op::EVIDENCE_SET,
-        }
-    }
-
-    /// Every list field, for tests and iteration.
-    pub fn all() -> [Self; 4] {
-        [Self::Labels, Self::Links, Self::Acceptance, Self::Evidence]
-    }
-}
-
-/// What to do with a list field.
-#[derive(Debug, Clone)]
-pub enum ListEdit<'a> {
-    /// Append values that are not already present.
-    Add(&'a [String]),
-    Remove(&'a [String]),
-    Clear,
-    /// Values as the CLI accepts them: `+x` adds, `-x` removes, a bare value
-    /// replaces the whole set. Replacements are computed from the current
-    /// state, which is why they need the lock.
-    Deltas(&'a [String]),
-}
-
-/// Apply one list edit.
+/// Delete an entry, and drop references to it.
 ///
-/// `Deltas` with any bare value is a read-modify-write and therefore requires
-/// the lock; `Add`, `Remove`, `Clear`, and pure `+`/`-` deltas are commutative
-/// appends and do not.
-pub fn edit_list(
-    m: &Mutation<'_>,
-    id: &str,
-    field: ListField,
-    edit: ListEdit<'_>,
-    if_rev: Option<&str>,
-) -> Result<TaskView, StoreError> {
-    m.check_rev(id, if_rev)?;
-    match edit {
-        ListEdit::Add(values) => m.append_and_view(id, field.add_op(), serde_json::json!(values)),
-        ListEdit::Remove(values) => {
-            m.append_and_view(id, field.remove_op(), serde_json::json!(values))
+/// A dangling blocker would leave an entry permanently unready with nothing on
+/// disk to explain why, so purge cleans up after itself. That is why it holds
+/// the store lock and why it is not `rm`.
+pub fn purge(txn: &Txn<'_>, input: &str) -> Result<Purge> {
+    let r#ref = txn.resolve(input)?;
+    let known = txn.known()?;
+    let (path, entry) = txn.load(&r#ref)?;
+    let deleted = crate::store::view_of(&entry, &crate::store::file_name(&path), &known);
+
+    let mut unblocked = Vec::new();
+    for (other_path, mut other) in txn.store().scan()?.entries {
+        if other.r#ref == r#ref {
+            continue;
         }
-        ListEdit::Clear => m.append_and_view(id, field.set_op(), serde_json::json!([])),
-        ListEdit::Deltas(values) => apply_deltas(m, id, field, values),
-    }
-}
-
-fn apply_deltas(
-    m: &Mutation<'_>,
-    id: &str,
-    field: ListField,
-    values: &[String],
-) -> Result<TaskView, StoreError> {
-    if values.is_empty() {
-        return m.view(id);
-    }
-    let adds: Vec<String> = values
-        .iter()
-        .filter_map(|v| v.strip_prefix('+').map(str::to_owned))
-        .collect();
-    let removes: Vec<String> = values
-        .iter()
-        .filter_map(|v| v.strip_prefix('-').map(str::to_owned))
-        .collect();
-    let replaces = values.iter().any(|v| !v.starts_with(['+', '-']));
-
-    if !replaces {
-        if !adds.is_empty() {
-            m.append(id, field.add_op(), serde_json::json!(adds))?;
-        }
-        if !removes.is_empty() {
-            m.append(id, field.remove_op(), serde_json::json!(removes))?;
-        }
-        return m.view(id);
-    }
-
-    // A bare value replaces the set, so the result depends on what is there
-    // now: this is the read-modify-write the lock exists for.
-    m.locked_txn("replacing a list")?;
-    let current = field.values(&m.load(id)?.state).to_vec();
-    let merged = merge(&current, values);
-    if merged != current {
-        m.append(id, field.set_op(), serde_json::json!(merged))?;
-    }
-    m.view(id)
-}
-
-/// `+x` adds, `-x` removes, a bare value replaces everything before it.
-fn merge(current: &[String], values: &[String]) -> Vec<String> {
-    use std::collections::BTreeSet;
-    let mut set: BTreeSet<String> = current.iter().cloned().collect();
-    let mut replaced = false;
-    for value in values {
-        if let Some(add) = value.strip_prefix('+') {
-            set.insert(add.to_owned());
-        } else if let Some(remove) = value.strip_prefix('-') {
-            set.remove(remove);
-        } else {
-            if !replaced {
-                set.clear();
-                replaced = true;
-            }
-            set.insert(value.clone());
+        if other.blocked_by.iter().any(|b| b == &r#ref) {
+            other.blocked_by.retain(|b| b != &r#ref);
+            Txn::touch(&mut other, &entry.updated);
+            txn.write(&other, Some(&other_path))?;
+            unblocked.push(other.r#ref);
         }
     }
-    set.into_iter().collect()
-}
-
-// ---------------------------------------------------------------------------
-// Graph
-// ---------------------------------------------------------------------------
-
-/// Add a blocking edge. Locked: the cycle check reads other records.
-pub fn add_blocker(m: &Mutation<'_>, id: &str, blocker: &str) -> Result<TaskView, StoreError> {
-    if id == blocker {
-        return Err(StoreError::InvalidInput("task cannot block itself".into()));
-    }
-    m.locked_txn("adding a blocker")?.add_blocker(id, blocker)
-}
-
-pub fn remove_blocker(
-    m: &Mutation<'_>,
-    id: &str,
-    blocker: &str,
-) -> Result<(TaskView, bool), StoreError> {
-    m.locked_txn("removing a blocker")?
-        .remove_blocker(id, blocker)
-}
-
-/// Set or clear the parent. Locked: validation reads other records.
-pub fn set_parent(
-    m: &Mutation<'_>,
-    id: &str,
-    parent: Option<&str>,
-) -> Result<TaskView, StoreError> {
-    m.locked_txn("setting a parent")?.set_parent(id, parent)
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
-
-pub fn archive(m: &Mutation<'_>, id: &str, if_rev: Option<&str>) -> Result<TaskView, StoreError> {
-    let txn = m.locked_txn("archiving a task")?;
-    txn.check_rev(id, if_rev)?;
-    let record = txn.load(id)?;
-    if !record.state.status.is_terminal() {
-        return Err(StoreError::InvalidInput(format!(
-            "only done or closed tasks can be archived ({} is {})",
-            record.state.alias, record.state.status
-        )));
-    }
-    if record.state.is_archived() {
-        return txn.view_of(id);
-    }
-    m.append_and_view(id, op::ARCHIVED, Value::Null)
-}
-
-pub fn unarchive(m: &Mutation<'_>, id: &str) -> Result<TaskView, StoreError> {
-    if !m.load(id)?.state.is_archived() {
-        return m.view(id);
-    }
-    m.append_and_view(id, op::UNARCHIVED, Value::Null)
-}
-
-/// Delete a record. Locked: it checks whether other records still reference it.
-pub fn purge(
-    m: &Mutation<'_>,
-    id: &str,
-    scrub: bool,
-    if_rev: Option<&str>,
-) -> Result<crate::store::PurgeOutcome, StoreError> {
-    let txn = m.locked_txn("deleting a task")?;
-    txn.check_rev(id, if_rev)?;
-    txn.purge(id, scrub)
-}
-
-// ---------------------------------------------------------------------------
-// Store-wide operations
-// ---------------------------------------------------------------------------
-
-/// Change every task's display project. Locked: it writes several records.
-pub fn rename_project(
-    m: &Mutation<'_>,
-    old: &str,
-    new: &str,
-) -> Result<crate::store::RenameResult, StoreError> {
-    m.locked_txn("renaming a project")?.rename_project(old, new)
-}
-
-/// Archive (or delete) terminal tasks older than `days`.
-pub fn clean(
-    m: &Mutation<'_>,
-    days: i64,
-    purge_records: bool,
-) -> Result<crate::store::CleanOutcome, StoreError> {
-    m.locked_txn("cleaning the store")?
-        .clean(days, purge_records)
-}
-
-/// Truncate torn tails left by interrupted writes.
-pub fn recover(
-    m: &Mutation<'_>,
-    id: Option<&str>,
-    dry_run: bool,
-) -> Result<crate::store::RecoverOutcome, StoreError> {
-    m.locked_txn("recovering records")?.recover(id, dry_run)
+    txn.delete(&r#ref)?;
+    Ok(Purge { deleted, unblocked })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Ctx, Filter, TASKS_DIR};
 
-    fn v(values: &[&str]) -> Vec<String> {
-        values.iter().map(|s| s.to_string()).collect()
+    const NOW: &str = "2026-01-10T12:00:00Z";
+    const LATER: &str = "2026-02-01T09:30:00Z";
+
+    fn store() -> (tempfile::TempDir, Ctx) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = Ctx::at_tasks_dir(dir.path().join(TASKS_DIR));
+        ctx.txn_init().unwrap();
+        (dir, ctx)
+    }
+
+    fn add(ctx: &Ctx, title: &str) -> EntryView {
+        let txn = ctx.txn().unwrap();
+        create(&txn, title, NOW).unwrap()
     }
 
     #[test]
-    fn deltas_add_remove_and_replace() {
-        assert_eq!(merge(&v(&["a"]), &v(&["+b"])), v(&["a", "b"]));
-        assert_eq!(merge(&v(&["a", "b"]), &v(&["-a"])), v(&["b"]));
-        // A bare value replaces everything before it, including earlier adds.
-        assert_eq!(merge(&v(&["a"]), &v(&["+c", "x", "y"])), v(&["x", "y"]));
+    fn a_log_keeps_every_entry_and_a_status_is_replaced() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        add_log(&txn, &view.entry.r#ref, "first", NOW).unwrap();
+        let view = add_log(&txn, &view.entry.r#ref, "second", LATER).unwrap();
+        assert_eq!(view.entry.log.len(), 2);
+        assert_eq!(view.entry.log[0].ts, NOW);
+        assert_eq!(view.entry.log[1].msg, "second");
+
+        let view = set_status(&txn, &view.entry.r#ref, Some("waiting"), LATER).unwrap();
+        assert_eq!(view.entry.status.as_deref(), Some("waiting"));
+        let view = set_status(&txn, &view.entry.r#ref, Some("reviewing"), LATER).unwrap();
         assert_eq!(
-            merge(&v(&["a", "b"]), &v(&["-a", "-b"])),
-            Vec::<String>::new()
+            view.entry.status.as_deref(),
+            Some("reviewing"),
+            "replaced, not appended"
         );
-        // Order is stable and duplicates collapse.
-        assert_eq!(merge(&v(&["b", "a"]), &v(&["+a"])), v(&["a", "b"]));
+        let view = set_status(&txn, &view.entry.r#ref, None, LATER).unwrap();
+        assert!(view.entry.status.is_none());
     }
 
     #[test]
-    fn every_field_has_a_distinct_op_set() {
-        let mut ops = std::collections::HashSet::new();
-        for field in ListField::all() {
-            for op_name in [field.add_op(), field.remove_op(), field.set_op()] {
-                assert!(ops.insert(op_name), "duplicate op {op_name}");
+    fn an_empty_log_message_is_refused() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        assert!(matches!(
+            add_log(&txn, &view.entry.r#ref, "  ", NOW),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn labels_are_normalized_and_deltas_compose() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        let labels = |changes: &[&str]| {
+            edit_labels(
+                &txn,
+                &view.entry.r#ref,
+                &changes.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>(),
+                NOW,
+            )
+            .unwrap()
+            .entry
+            .labels
+        };
+        assert_eq!(
+            labels(&["+Backend", "+backend", "+ api "]),
+            ["api", "backend"]
+        );
+        assert_eq!(labels(&["+urgent", "-backend"]), ["api", "urgent"]);
+        // A bare label replaces the whole set.
+        assert_eq!(labels(&["ops"]), ["ops"]);
+        // Add and remove compose in one call, case-insensitively.
+        assert_eq!(labels(&["+One", "-one"]), ["ops"]);
+        assert_eq!(labels(&["+one", "-ops", "-ONE"]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn closing_stamps_and_reopening_clears() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        let done = set_state(&txn, &view.entry.r#ref, State::Done, LATER).unwrap();
+        assert_eq!(done.entry.done.as_deref(), Some(LATER));
+        let reopened = set_state(&txn, &done.entry.r#ref, State::Open, LATER).unwrap();
+        assert!(reopened.entry.done.is_none());
+        assert_eq!(reopened.entry.created, NOW, "created never moves");
+        assert_eq!(reopened.entry.log.len(), 0);
+    }
+
+    #[test]
+    fn blocking_is_checked_before_it_is_written() {
+        let (_dir, ctx) = store();
+        let a = add(&ctx, "Alpha");
+        let b = add(&ctx, "Beta");
+        let c = add(&ctx, "Gamma");
+        let txn = ctx.txn().unwrap();
+
+        add_blocker(&txn, &b.entry.r#ref, &a.entry.r#ref, NOW).unwrap();
+        add_blocker(&txn, &c.entry.r#ref, &b.entry.r#ref, NOW).unwrap();
+
+        // Direct loop.
+        let err = add_blocker(&txn, &a.entry.r#ref, &a.entry.r#ref, NOW).unwrap_err();
+        assert!(matches!(err, StoreError::WouldCycle { .. }), "{err:?}");
+        // Indirect loop, with the path in the message.
+        let err = add_blocker(&txn, &a.entry.r#ref, &c.entry.r#ref, NOW).unwrap_err();
+        match err {
+            StoreError::WouldCycle { path, .. } => {
+                assert!(
+                    path.contains("a7") || path.contains(&a.entry.r#ref),
+                    "{path}"
+                );
+                assert!(path.contains("->"), "{path}");
             }
+            other => panic!("expected a refusal, got {other:?}"),
         }
-        assert_eq!(ops.len(), 12);
+        // Nothing was written by the refusals.
+        let store = ctx.store().unwrap();
+        let alpha = store.get(&a.entry.r#ref).unwrap();
+        assert!(
+            alpha.entry.blocked_by.is_empty(),
+            "{:?}",
+            alpha.entry.blocked_by
+        );
+
+        // A blocker that does not exist is an error, not a drop.
+        assert!(add_blocker(&txn, &a.entry.r#ref, "nope", NOW).is_err());
+    }
+
+    #[test]
+    fn readiness_follows_blockers_and_completion() {
+        let (_dir, ctx) = store();
+        let a = add(&ctx, "Alpha");
+        let b = add(&ctx, "Beta");
+        let txn = ctx.txn().unwrap();
+        add_blocker(&txn, &b.entry.r#ref, &a.entry.r#ref, NOW).unwrap();
+        let store = ctx.store().unwrap();
+        let ready = |f: Filter| store.list(&f).unwrap().0;
+        assert_eq!(
+            ready(Filter {
+                ready: true,
+                ..Default::default()
+            })
+            .len(),
+            1
+        );
+
+        // Completing the blocker lets the blocked entry start.
+        set_state(&txn, &a.entry.r#ref, State::Done, LATER).unwrap();
+        let ready = ready(Filter {
+            ready: true,
+            ..Default::default()
+        });
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].entry.r#ref, b.entry.r#ref);
+    }
+
+    #[test]
+    fn a_dangling_blocker_is_unresolved_and_never_ready() {
+        let (_dir, ctx) = store();
+        let a = add(&ctx, "Alpha");
+        // Written by hand, the way a lost purge or a hand edit would leave it.
+        let path = ctx.tasks_dir.join(&a.file);
+        let mut entry: Entry =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        entry.blocked_by = vec!["zzzz".into()];
+        std::fs::write(&path, serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+
+        let view = ctx.store().unwrap().get(&a.entry.r#ref).unwrap();
+        assert_eq!(view.unresolved_blockers, ["zzzz"]);
+        assert!(view.is_blocked());
+        assert!(
+            !view.is_ready(),
+            "unresolved counts as blocking, never as done"
+        );
+    }
+
+    #[test]
+    fn acceptance_is_a_list_that_can_be_edited_in_place() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        let change = |set: Option<Vec<String>>, add: &[&str], remove: &[&str], clear: bool| {
+            AcceptanceChange {
+                set,
+                add: add.iter().map(|s| (*s).to_owned()).collect(),
+                remove: remove.iter().map(|s| (*s).to_owned()).collect(),
+                clear,
+            }
+        };
+        let out = edit_acceptance(
+            &txn,
+            &view.entry.r#ref,
+            &change(None, &["parity test passes", "docs updated"], &[], false),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(out.entry.acceptance.len(), 2);
+
+        let out = edit_acceptance(
+            &txn,
+            &view.entry.r#ref,
+            &change(None, &[], &["PARITY TEST PASSES"], false),
+            LATER,
+        )
+        .unwrap();
+        assert_eq!(
+            out.entry.acceptance,
+            ["docs updated"],
+            "removal ignores case"
+        );
+
+        let out = edit_acceptance(
+            &txn,
+            &view.entry.r#ref,
+            &change(Some(vec!["only this".into()]), &[], &[], false),
+            LATER,
+        )
+        .unwrap();
+        assert_eq!(out.entry.acceptance, ["only this"], "a set replaces");
+
+        let out = edit_acceptance(
+            &txn,
+            &view.entry.r#ref,
+            &change(None, &[], &[], true),
+            LATER,
+        )
+        .unwrap();
+        assert!(out.entry.acceptance.is_empty());
+    }
+
+    #[test]
+    fn the_multi_field_edit_writes_once_and_orders_nothing_badly() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        let edit = Edit {
+            title: Some("Alpha, revised".into()),
+            status: Some(Some("blocked on review".into())),
+            add_labels: vec!["backend".into()],
+            acceptance: AcceptanceChange {
+                add: vec!["parity test passes".into()],
+                ..Default::default()
+            },
+            note: Some("started".into()),
+            ..Default::default()
+        };
+        let out = apply_edit(&txn, &view.entry.r#ref, &edit, LATER).unwrap();
+        assert_eq!(out.entry.title, "Alpha, revised");
+        assert_eq!(out.entry.status.as_deref(), Some("blocked on review"));
+        assert_eq!(out.entry.labels, ["backend"]);
+        assert_eq!(out.entry.acceptance, ["parity test passes"]);
+        assert_eq!(out.entry.log.len(), 1);
+        assert_eq!(out.entry.updated, LATER);
+        assert_eq!(out.file, view.file, "a title change does not move the file");
+        assert_eq!(out.entry.created, NOW);
+
+        // A bad reference fails the whole edit: the blockers are resolved before
+        // anything is written.
+        let edit = Edit {
+            title: Some("Should not stick".into()),
+            add_blockers: vec!["nope".into()],
+            ..Default::default()
+        };
+        assert!(apply_edit(&txn, &view.entry.r#ref, &edit, LATER).is_err());
+        let after = ctx.store().unwrap().get(&view.entry.r#ref).unwrap();
+        assert_eq!(after.entry.title, "Alpha, revised");
+    }
+
+    #[test]
+    fn an_edit_with_nothing_to_do_is_refused() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        assert!(matches!(
+            apply_edit(&txn, &view.entry.r#ref, &Edit::default(), NOW),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn purge_unblocks_what_it_was_blocking() {
+        let (_dir, ctx) = store();
+        let a = add(&ctx, "Alpha");
+        let b = add(&ctx, "Beta");
+        let txn = ctx.txn().unwrap();
+        add_blocker(&txn, &b.entry.r#ref, &a.entry.r#ref, NOW).unwrap();
+        assert!(!ctx.store().unwrap().get(&b.entry.r#ref).unwrap().is_ready());
+
+        let outcome = purge(&txn, &a.entry.r#ref).unwrap();
+        assert_eq!(outcome.deleted.entry.r#ref, a.entry.r#ref);
+        assert_eq!(outcome.unblocked, std::slice::from_ref(&b.entry.r#ref));
+
+        let store = ctx.store().unwrap();
+        assert!(store.get(&a.entry.r#ref).is_err(), "the entry is gone");
+        let beta = store.get(&b.entry.r#ref).unwrap();
+        assert!(
+            beta.entry.blocked_by.is_empty(),
+            "the reference was dropped"
+        );
+        assert!(beta.is_ready());
+    }
+
+    #[test]
+    fn set_slug_moves_the_file_without_changing_the_ref() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let old = ctx.tasks_dir.join(&view.file);
+        let txn = ctx.txn().unwrap();
+        let moved = set_slug(&txn, &view.entry.r#ref, "Something Else", LATER).unwrap();
+        assert_eq!(moved.entry.r#ref, view.entry.r#ref);
+        assert_eq!(
+            moved.file,
+            format!("{}-something-else.json", view.entry.r#ref)
+        );
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn every_operation_refuses_a_stale_revision_without_writing() {
+        let (_dir, ctx) = store();
+        let view = add(&ctx, "Alpha");
+        let txn = ctx.txn().unwrap();
+        // The caller read an older revision.
+        let mut change = Change::open(&txn, &view.entry.r#ref, None).unwrap();
+        change.entry.status = Some("x".into());
+        change.save(&txn, LATER).unwrap();
+
+        assert!(matches!(
+            txn.store().check_rev(&view.entry.r#ref, Some(&view.rev)),
+            Err(StoreError::StaleRevision { .. })
+        ));
     }
 }

@@ -1,13 +1,15 @@
-//! Output formatting: task tables, detail views, config display, JSON.
+//! Output formatting: the table, the detail view, configuration, JSON.
 //!
-//! The table shows the 4-character alias — the handle people type — while the
-//! detail view shows both the alias and the full ULID. JSON always carries both.
+//! Human output leads with the ref, because that is what people type back. JSON
+//! carries the whole document, and every command emits it through one envelope
+//! (see [`crate::output`]) so an agent never has to parse prose.
 
 use std::io::IsTerminal as _;
 
 use owo_colors::OwoColorize;
 
-use crate::model::{Config, Priority, Status, TaskState, TaskView};
+use crate::model::{Config, EntryView, State};
+use crate::store::Ctx;
 use crate::timeutil;
 
 /// Color when stdout is a TTY and `NO_COLOR` is unset.
@@ -28,342 +30,328 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+#[derive(Clone, Copy)]
+enum Style {
+    Dim,
+    Yellow,
+    Blue,
+    Cyan,
+}
+
 fn paint(color: bool, text: &str, style: Style) -> String {
     if !color {
         return text.to_owned();
     }
     match style {
-        Style::Plain => text.to_owned(),
         Style::Dim => text.dimmed().to_string(),
-        Style::Red => text.red().to_string(),
-        Style::RedBold => text.red().bold().to_string(),
         Style::Yellow => text.yellow().to_string(),
         Style::Blue => text.blue().to_string(),
         Style::Cyan => text.cyan().to_string(),
     }
 }
 
-#[derive(Clone, Copy)]
-enum Style {
-    Plain,
-    Dim,
-    Red,
-    RedBold,
-    Yellow,
-    Blue,
-    Cyan,
-}
-
-fn status_style(s: Status) -> Style {
-    match s {
-        Status::Open => Style::Blue,
-        Status::Active => Style::Cyan,
-        Status::Done => Style::Dim,
-        Status::Deferred => Style::Plain,
-        Status::Closed => Style::Plain,
+fn state_style(state: State) -> Style {
+    match state {
+        State::Open => Style::Cyan,
+        State::Done => Style::Dim,
+        State::Dropped => Style::Dim,
     }
 }
 
-fn priority_style(p: Priority) -> Style {
-    match p {
-        Priority::Urgent => Style::RedBold,
-        Priority::High => Style::Red,
-        Priority::Medium => Style::Yellow,
-        Priority::Low => Style::Blue,
-        Priority::None => Style::Dim,
-    }
-}
-
-/// Width of the handle column: the longest alias in the result set.
-fn alias_width(tasks: &[TaskView]) -> usize {
-    tasks
-        .iter()
-        .map(|t| t.task.alias.chars().count())
-        .max()
-        .unwrap_or(4)
-        .clamp(4, 12)
-}
-
-fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
-    let prio = format!("{:<4}", t.task.priority.short());
-    let mut status_text = t.task.status.to_string();
-    if t.task.status.is_terminal()
-        && let Some(c) = &t.task.completed_at
-    {
-        status_text = format!("{} {}", t.task.status, timeutil::format_relative(c));
-    }
-    let status = format!("{status_text:<12}");
-    let title = truncate(&t.task.title, 50);
-
-    if color {
-        let tc = if t.task.status == Status::Done {
-            Style::Dim
-        } else {
-            Style::Plain
-        };
-        return format!(
-            "{:<w$} | {} | {} | {}",
-            t.task.alias,
-            paint(color, &prio, priority_style(t.task.priority)),
-            paint(color, &status, status_style(t.task.status)),
-            paint(color, &title, tc),
-        );
-    }
-
-    let mut markers = String::new();
-    if t.task.is_archived() {
-        markers += " [archived]";
-    }
-    if t.blocked_by_incomplete {
-        markers += " [blocked]";
-    }
+/// One row of the list: ref, state, labels, title.
+fn render_row(view: &EntryView, color: bool) -> String {
+    let entry = &view.entry;
+    let labels = if entry.labels.is_empty() {
+        String::new()
+    } else {
+        truncate(&entry.labels.join(","), 24)
+    };
+    let title = truncate(&entry.title, 60);
     format!(
-        "{:<w$} | {prio} | {status} | {title}{markers}",
-        t.task.alias,
-        w = w
+        "{} | {} | {} | {}{}",
+        paint(color, &entry.r#ref, Style::Blue),
+        paint(
+            color,
+            &format!("{:<7}", entry.state),
+            state_style(entry.state)
+        ),
+        paint(color, &format!("{labels:<24}"), Style::Dim),
+        title,
+        blocked_marker(view, color)
     )
+    .trim_end()
+    .to_owned()
 }
 
-pub fn format_task_list(tasks: &[TaskView], empty_hint: &str, color: bool) -> String {
-    if tasks.is_empty() {
-        if empty_hint.is_empty() {
-            return "No tasks found. Run 'tk add \"title\"' to create one.".to_owned();
-        }
+/// ` [blocked]` for an entry waiting on something, and a distinct mark when what
+/// it waits on is not in the store.
+fn blocked_marker(view: &EntryView, color: bool) -> String {
+    if !view.is_waiting() {
+        return String::new();
+    }
+    let text = if view.unresolved_blockers.is_empty() {
+        " [blocked]"
+    } else {
+        " [blocked?]"
+    };
+    paint(color, text, Style::Yellow)
+}
+
+/// A list of entries, or `empty_hint` when there are none.
+pub fn render_list(views: &[EntryView], empty_hint: &str, color: bool) -> String {
+    if views.is_empty() {
         return empty_hint.to_owned();
     }
-    let w = alias_width(tasks);
-    let header = format!("{:<w$} | PRIO | STATUS       | TITLE", "REF");
-    let divider = "-".repeat(header.chars().count());
-    let mut rows = vec![header, divider];
-    rows.extend(tasks.iter().map(|t| format_task_row_w(t, color, w)));
-    rows.join("\n")
+    let mut lines: Vec<String> = views.iter().map(|v| render_row(v, color)).collect();
+    let blocked = views.iter().filter(|v| v.is_waiting()).count();
+    let mut summary = format!(
+        "{} entr{}",
+        views.len(),
+        if views.len() == 1 { "y" } else { "ies" }
+    );
+    if blocked > 0 {
+        summary.push_str(&format!(", {blocked} blocked"));
+    }
+    lines.push(String::new());
+    lines.push(paint(color, &summary, Style::Dim));
+    lines.join("\n")
 }
 
-pub fn format_task_detail(t: &TaskView, color: bool) -> String {
-    let task: &TaskState = &t.task;
-    let mut lines = Vec::new();
-    lines.push(format!("ID:          {}", task.id));
-    lines.push(format!("Ref:         {}", task.alias));
-    if !task.legacy_aliases.is_empty() {
-        lines.push(format!("Also known:  {}", task.legacy_aliases.join(", ")));
-    }
-    lines.push(format!("Project:     {}", task.project));
-    if !task.title.is_empty() {
-        lines.push(format!("Title:       {}", task.title));
-    }
-    lines.push(format!(
-        "Status:      {}",
-        paint(color, &task.status.to_string(), status_style(task.status))
-    ));
-    lines.push(format!(
-        "Priority:    {}",
-        paint(color, task.priority.name(), priority_style(task.priority))
-    ));
-    if let Some(d) = &task.description {
-        lines.push(format!("Description: {d}"));
-    }
-    if !task.labels.is_empty() {
-        lines.push(format!("Labels:      {}", task.labels.join(", ")));
-    }
-    if let Some(p) = &t.parent_ref {
-        lines.push(format!("Parent:      {p}"));
-    }
-    lines.push(format!(
-        "Created:     {}",
-        timeutil::format_date(&task.created_at)
-    ));
-    lines.push(format!(
-        "Updated:     {}",
-        timeutil::format_date(&task.updated_at)
-    ));
-    if let Some(c) = &task.completed_at {
-        lines.push(format!("Completed:   {}", timeutil::format_date(c)));
-    }
-    if let Some(a) = &task.archived_at {
-        lines.push(format!("Archived:    {}", timeutil::format_date(a)));
-    }
-    lines.push(format!("Revision:    {}", t.rev));
-    if !t.unresolved_blockers.is_empty() {
+/// The whole document, rendered for a person: fields, criteria, then the log.
+pub fn render_detail(view: &EntryView, color: bool) -> String {
+    let entry = &view.entry;
+    let mut lines = vec![format!(
+        "{}  {}",
+        paint(color, &entry.r#ref, Style::Blue),
+        entry.title
+    )];
+
+    let mut field = |label: &str, value: String| {
+        if value.is_empty() {
+            return;
+        }
         lines.push(format!(
-            "Unresolved:  {} (task missing from the store)",
-            t.unresolved_blockers
-                .iter()
-                .map(|id| id.chars().take(8).collect::<String>())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "      {} {}",
+            paint(color, &format!("{label:<8}"), Style::Dim),
+            value
         ));
+    };
+
+    field(
+        "state",
+        paint(color, entry.state.as_str(), state_style(entry.state)).to_string(),
+    );
+    field("labels", entry.labels.join(", "));
+    field(
+        "created",
+        format!(
+            "{} ({})",
+            timeutil::format_date(&entry.created),
+            timeutil::format_relative(&entry.created)
+        ),
+    );
+    field(
+        "updated",
+        format!(
+            "{} ({})",
+            timeutil::format_date(&entry.updated),
+            timeutil::format_relative(&entry.updated)
+        ),
+    );
+    if let Some(done) = &entry.done {
+        field("done", timeutil::format_date(done));
     }
-    if !task.blocked_by.is_empty() {
-        let state = if t.blocked_by_incomplete {
-            " (blocked)"
-        } else {
-            " (resolved)"
-        };
-        lines.push(format!("Blockers:    {}{state}", t.blocker_refs.join(", ")));
-    }
-    if let Some(c) = &task.checkpoint {
-        lines.push(String::new());
-        lines.push(format!("Checkpoint:  {c}"));
-    }
-    if !task.links.is_empty() {
-        lines.push(format!("Links:       {}", task.links.join(", ")));
-    }
-    if !task.acceptance.is_empty() {
-        lines.push(String::new());
-        lines.push("Acceptance:".to_owned());
-        for a in &task.acceptance {
-            lines.push(format!("  - {a}"));
+    if !entry.blocked_by.is_empty() {
+        let mut blockers = entry.blocked_by.join(", ");
+        if !view.unresolved_blockers.is_empty() {
+            blockers.push_str(&format!(
+                "  (not in this store: {})",
+                view.unresolved_blockers.join(", ")
+            ));
         }
+        field(
+            "blocked",
+            paint(color, &blockers, Style::Yellow).to_string(),
+        );
     }
-    if !task.evidence.is_empty() {
-        lines.push(String::new());
-        lines.push("Evidence:".to_owned());
-        for e in &task.evidence {
-            lines.push(format!("  - {e}"));
-        }
+    if let Some(status) = &entry.status {
+        field("status", status.clone());
     }
-    if !task.logs.is_empty() {
+    for (index, item) in entry.acceptance.iter().enumerate() {
+        let label = if index == 0 { "accept" } else { "" };
+        field(label, format!("{}. {}", index + 1, item));
+    }
+    field("file", paint(color, &view.file, Style::Dim).to_string());
+    field("rev", paint(color, &view.rev, Style::Dim).to_string());
+
+    if !entry.log.is_empty() {
         lines.push(String::new());
-        lines.push("Log:".to_owned());
-        for log in &task.logs {
+        lines.push(paint(color, "      log", Style::Dim).to_string());
+        for line in &entry.log {
             lines.push(format!(
-                "  [{}] {}",
-                timeutil::format_date(&log.ts),
-                log.msg
+                "        {}  {}",
+                paint(color, &timeutil::format_date(&line.ts), Style::Dim),
+                line.msg
             ));
         }
     }
     lines.join("\n")
 }
 
-/// Single-line warning (yellow when color is on).
+/// One line confirming a change: ref, state, title.
+pub fn render_summary(view: &EntryView) -> String {
+    format!(
+        "{}  {}  {}",
+        view.entry.r#ref,
+        view.entry.state,
+        truncate(&view.entry.title, 60)
+    )
+}
+
+/// What a store holds, and where it is.
+pub fn render_config(ctx: &Ctx, config: &Config, entries: usize) -> String {
+    let mut lines = vec![
+        format!("Store:   {}", ctx.tasks_dir.display()),
+        format!("Found:   {}", ctx.source.name()),
+        format!("Format:  {}", config.format),
+        format!("Entries: {entries}"),
+    ];
+    match &config.aliases {
+        Some(aliases) if !aliases.is_empty() => {
+            lines.push(String::new());
+            lines.push("Aliases:".to_owned());
+            for (name, path) in aliases {
+                lines.push(format!("  {name:<10} -> {path}"));
+            }
+        }
+        _ => {}
+    }
+    lines.join("\n")
+}
+
+/// A warning line, for issues that do not stop a command.
 pub fn warning(text: &str, color: bool) -> String {
-    paint(color, text, Style::Yellow)
+    paint(color, &format!("warning: {text}"), Style::Yellow)
 }
 
 pub fn format_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned())
 }
 
-pub fn format_config(config: &Config) -> String {
-    let mut lines = vec![
-        format!("Format:      {}", config.format),
-        format!("Project:     {}", config.project),
-    ];
-    if config.clean_after.enabled {
-        lines.push(format!("Clean After: {} days", config.clean_after.days));
-    } else {
-        lines.push("Clean After: disabled".to_owned());
-    }
-    if !config.defaults.labels.is_empty() {
-        lines.push(format!(
-            "Def Labels:  {}",
-            config.defaults.labels.join(", ")
-        ));
-    }
-    lines.push(format!("Def Prio:    {}", config.defaults.priority.name()));
-    if let Some(aliases) = &config.aliases
-        && !aliases.is_empty()
-    {
-        lines.push(String::new());
-        lines.push("Aliases:".to_owned());
-        for (name, path) in aliases {
-            lines.push(format!("  {name:<10} -> {path}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push(
-        "Change a setting with: tk config set <project|priority|labels|clean-after> <value>"
-            .to_owned(),
-    );
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LogEntry, TaskState};
+    use crate::model::{Entry, LogEntry};
 
-    fn sample() -> TaskView {
-        TaskView {
-            task: TaskState {
-                id: "01j8x0m5r7000000000000000a".into(),
-                alias: "a7b3".into(),
-                legacy_aliases: Vec::new(),
-                project: "demo".into(),
-                title: "Implement auth".into(),
-                description: None,
-                status: Status::Open,
-                priority: Priority::Urgent,
-                labels: vec![],
-                parent: None,
-                blocked_by: vec![],
-                logs: vec![LogEntry {
-                    ts: "2026-01-10T12:00:00.000000000Z".into(),
-                    msg: "note".into(),
-                }],
-                checkpoint: None,
-                links: Vec::new(),
-                acceptance: Vec::new(),
-                evidence: Vec::new(),
-                created_at: "2026-01-10T12:00:00.000000000Z".into(),
-                updated_at: "2026-01-10T12:00:00.000000000Z".into(),
-                completed_at: None,
-                archived_at: None,
-            },
-            rev: "1-aaaa:1:deadbeef".into(),
-            blocked_by_incomplete: false,
+    fn view(title: &str) -> EntryView {
+        let mut entry = Entry::new("a7b3".into(), title.into(), "2026-01-10T12:00:00Z".into());
+        entry.labels = vec!["backend".into(), "api".into()];
+        entry.status = Some("Halfway".into());
+        entry.acceptance = vec!["parity test passes".into()];
+        entry.log = vec![LogEntry {
+            ts: "2026-01-10T09:00:00Z".into(),
+            msg: "Started with the JWT approach.".into(),
+        }];
+        EntryView {
+            entry,
+            rev: "0123456789abcdef".into(),
             unresolved_blockers: Vec::new(),
-            blocker_refs: Vec::new(),
-            parent_ref: None,
+            blocking: Vec::new(),
+            file: "a7b3-rewrite-the-auth-layer.json".into(),
         }
     }
 
     #[test]
-    fn truncate_is_unicode_safe() {
-        assert_eq!(truncate("héllo→world", 6), "héllo…");
-        assert_eq!(truncate("abc", 5), "abc");
-        assert_eq!(truncate("abcdef", 1), "…");
+    fn a_row_leads_with_the_ref_and_has_no_trailing_space() {
+        let row = render_row(&view("Rewrite the auth layer"), false);
+        assert!(row.starts_with("a7b3 | open"), "{row}");
+        assert!(row.contains("backend,api"), "{row}");
+        assert!(row.contains("Rewrite the auth layer"), "{row}");
+        assert_eq!(row, row.trim_end());
     }
 
     #[test]
-    fn the_table_uses_the_alias_not_the_ulid() {
-        let t = sample();
-        let table = format_task_list(std::slice::from_ref(&t), "", false);
-        assert!(table.contains("a7b3"), "{table}");
+    fn a_blocked_row_says_so_and_a_missing_blocker_says_more() {
+        let mut blocked = view("Alpha");
+        blocked.entry.blocked_by = vec!["b7c4".into()];
+        blocked.blocking = vec!["b7c4".into()];
+        assert!(render_row(&blocked, false).contains("[blocked]"));
+        blocked.unresolved_blockers = vec!["b7c4".into()];
+        assert!(render_row(&blocked, false).contains("[blocked?]"));
+        blocked.blocking.clear();
         assert!(
-            !table.contains("01j8x0m5r7000000000000000a"),
-            "the 26-character ID must not widen every row: {table}"
+            !render_row(&blocked, false).contains("blocked"),
+            "a finished blocker is not a marker"
         );
+        // A done entry is not waiting, even while it names an open blocker.
+        let mut done = blocked.clone();
+        done.blocking = vec!["b7c4".into()];
+        done.entry.state = State::Done;
+        assert!(!render_row(&done, false).contains("blocked"));
     }
 
     #[test]
-    fn a_blocked_task_is_marked() {
-        let mut t = sample();
-        t.blocked_by_incomplete = true;
-        t.task.blocked_by = vec!["01m25qbfpr5ekbr9zxh0xc93kx".into()];
-        t.blocker_refs = vec!["vp80".into()];
-        let table = format_task_list(std::slice::from_ref(&t), "", false);
-        assert!(table.contains("[blocked]"), "{table}");
-
-        let detail = format_task_detail(&t, false);
-        assert!(detail.contains("Blockers:    vp80 (blocked)"), "{detail}");
-        assert!(
-            !detail.contains("Blockers:    01m25qbf"),
-            "the blocker line must not lead with a ULID: {detail}"
-        );
+    fn an_empty_list_says_what_to_do_instead() {
+        assert_eq!(render_list(&[], "no entries", false), "no entries");
     }
 
     #[test]
-    fn detail_shows_both_handles_and_renders_timestamps() {
-        let t = sample();
-        let detail = format_task_detail(&t, false);
-        assert!(detail.contains("01j8x0m5r7000000000000000a"), "{detail}");
-        assert!(detail.contains("Ref:         a7b3"), "{detail}");
-        // Nano timestamps must render, not pass through raw.
+    fn the_summary_counts_entries_and_blocked_ones() {
+        let mut blocked = view("Beta");
+        blocked.entry.r#ref = "b7c4".into();
+        blocked.entry.blocked_by = vec!["zzzz".into()];
+        blocked.blocking = vec!["zzzz".into()];
+        let out = render_list(&[view("Alpha"), blocked], "none", false);
+        assert!(out.contains("2 entries, 1 blocked"), "{out}");
+        let one = render_list(&[view("Alpha")], "none", false);
+        assert!(one.contains("1 entry"), "{one}");
+    }
+
+    #[test]
+    fn detail_shows_every_field_that_is_set_and_skips_what_is_not() {
+        let out = render_detail(&view("Rewrite the auth layer"), false);
+        for expected in [
+            "Rewrite the auth layer",
+            "state",
+            "open",
+            "labels",
+            "backend, api",
+            "status",
+            "Halfway",
+            "accept",
+            "1. parity test passes",
+            "log",
+            "Started with the JWT approach.",
+            "a7b3-rewrite-the-auth-layer.json",
+        ] {
+            assert!(out.contains(expected), "{expected} missing from:\n{out}");
+        }
         assert!(
-            !detail.contains("2026-01-10T12:00:00.000000000Z"),
-            "{detail}"
+            !out.contains("done"),
+            "an open entry has no done time:\n{out}"
         );
+        assert!(!out.contains("blocked"), "nothing is blocking it:\n{out}");
+    }
+
+    #[test]
+    fn detail_lists_acceptance_in_order_and_marks_missing_blockers() {
+        let mut v = view("Alpha");
+        v.entry.acceptance = vec!["first".into(), "second".into()];
+        v.entry.blocked_by = vec!["b7c4".into()];
+        v.unresolved_blockers = vec!["b7c4".into()];
+        v.blocking = vec!["b7c4".into()];
+        let out = render_detail(&v, false);
+        assert!(out.contains("1. first"), "{out}");
+        assert!(out.contains("2. second"), "{out}");
+        assert!(out.contains("not in this store: b7c4"), "{out}");
+    }
+
+    #[test]
+    fn truncation_counts_characters_not_bytes() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate("hello", 4), "hel…");
+        assert_eq!(truncate("日本語テキスト", 3), "日本…");
+        assert_eq!(truncate("anything", 1), "…");
     }
 }

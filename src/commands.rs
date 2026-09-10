@@ -1,50 +1,43 @@
 //! Subcommand implementations.
+//!
+//! Every command is the same three steps: resolve what it names, call one
+//! [`crate::ops`] function, print what came back. Nothing here decides what a
+//! change means — that lives in `ops`, so `apply` and the commands cannot drift.
 
 mod add;
 mod batch;
 mod config;
-mod deps;
-mod detail;
 mod edit;
 mod list;
-mod log;
 mod misc;
-mod show;
-mod status;
 
-pub use add::Add;
+pub use add::{Add, Init};
 pub use batch::Apply;
 pub use config::Config;
-pub use deps::{Block, Unblock};
-pub use detail::{Accept, Archive, Checkpoint, Evidence, Link, Unarchive, Unlink};
-pub use edit::Edit;
-pub use list::{List, Ready};
-pub use log::Log;
-pub use misc::{Check, Clean, Init, Lock, Mv, Purge, Recover, StorePath};
-pub use show::Show;
-pub use status::{Close, Defer, Done, Open, Start};
+pub use edit::{Accept, Block, Done, Drop, Edit, Label, Note, State, Status, Unblock};
+pub use list::{List, Ready, Show};
+pub use misc::{Check, Lock, Purge, StorePath};
 
 use miette::Result;
 
 use crate::cli::AppCtx;
-
-/// Resolve a user-supplied alias, ID, or ID prefix against the store.
-///
-/// Read-only callers use this; mutations resolve through [`crate::ops`].
-pub fn resolve(ctx: &AppCtx, input: &str) -> Result<String> {
-    Ok(ctx.store.store()?.resolve(input)?)
-}
+use crate::timeutil;
 
 impl AppCtx {
-    /// Require an existing v1 store, with the format gate applied.
+    /// Require a store this binary can read, applying the format gate.
     pub(crate) fn require_store(&self) -> Result<()> {
         Ok(self.store.require()?)
+    }
+
+    /// Now, as every write stamps it.
+    pub(crate) fn now(&self) -> String {
+        timeutil::now_rfc3339_nano()
     }
 
     /// Emit a result in the shape the caller asked for.
     ///
     /// `--json` always produces the same envelope (see [`crate::output`]);
-    /// otherwise the human rendering is built lazily, so JSON runs never pay
+    /// otherwise the human rendering is built lazily, so a JSON run never pays
     /// for it.
     pub(crate) fn emit<T: serde::Serialize>(
         &self,
