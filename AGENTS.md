@@ -1,6 +1,7 @@
 # tk
 
-Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
+Minimal task tracker CLI — append-only JSON event records in `.tasks/`, single
+binary, no runtime.
 
 ## Project Structure
 
@@ -8,15 +9,19 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 | ------------------ | -------------------------------------------------------------- |
 | `src/main.rs`      | Binary entry — calls `tk::cli::run()`                          |
 | `src/lib.rs`       | Library root (all modules `pub` for integration tests)         |
-| `src/cli.rs`       | Root `Cli` derive, global flags (`-j/--json`, `-C/--dir`)      |
-| `src/commands/`    | One module per command; `misc.rs` holds Remove/Init/Mv/Clean/Check, `detail.rs` holds checkpoint/links/acceptance/evidence/archive |
-| `src/commands/config.rs` | Nested `config` subcommands (project/alias/defaults/clean-after) |
-| `src/model.rs`     | `Task`, `Config`, `Status`, `Priority` — lenient serde for old files |
-| `src/store.rs`     | `Ctx` (store resolution), `Txn` (locked mutations), atomic writes, CRUD, list/filter, integrity |
-| `src/ids.rs`       | Project/ref validation, ref generation, ID resolution          |
+| `src/cli.rs`       | Root `Cli` derive, global flags (`-j/--json`, `-C/--dir`), error envelope |
+| `src/commands/`    | One module per command; `misc.rs` holds Init/Mv/Clean/Check/Purge/Recover/Path/Lock, `detail.rs` the detail fields, `batch.rs` the `apply` entry point |
+| `src/model.rs`     | `TaskState`, `TaskView`, `Config`, `Status`, `Priority` — lenient serde |
+| `src/record.rs`    | The event log: `Event`, `Record`, append, fold, torn-tail recovery |
+| `src/store.rs`     | `Ctx` (location + format gate), `Store` (reads, lock-free appends), `Txn` (locked operations), list/filter, integrity |
+| `src/ids.rs`       | ULID generation, aliases, reference resolution                 |
+| `src/apply.rs`     | `tk apply`: intent parsing, whole-batch validation, execution   |
+| `src/output.rs`    | The JSON envelope and its stable error codes                   |
 | `src/timeutil.rs`  | Due parsing (`+7d`), calendar-day overdue, RFC3339Nano stamps  |
 | `src/format.rs`    | Table/JSON output, color handling, unicode-safe truncation     |
-| `tests/cli.rs`     | Help-drift snapshot + end-to-end CLI tests                     |
+| `tests/cli.rs`     | Help-drift snapshot + end-to-end and concurrency tests         |
+| `tests/migration.rs` | Runs `tools/migrate-v0.py` against a v0 fixture             |
+| `tools/migrate-v0.py` | One-shot v0 → v1 conversion; not a subcommand, delete after cutover |
 | `ai/`              | **Symlink** into the central knowledge store (`agent-context/projects/github.com/nijaru/tk/ai`). Owned by the context system — do not write here from a repo session |
 | `.local/`          | Clone-local working notes — excluded via `.git/info/exclude`   |
 | `.tasks/`          | Local-only task state — excluded via `.git/info/exclude`       |
@@ -42,28 +47,38 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
   no global working directory.
 - Completions/manpages come from `tk __usage_spec__` via the `usage` CLI; there is
   no `completions` subcommand.
+- Every command reports through `ctx.emit(...)` (human text lazily, envelope when
+  `--json`) and `cli::run` prints the failure envelope once. Do not print JSON
+  directly from a command, or the shape drifts.
 
 ## Compatibility Notes
 
-- Reads task files written by the old Go binary: unknown fields ignored, explicit
-  `null` slices read as empty, legacy string logs and `cancelled` status parsed.
-- New task fields (`checkpoint`, `links`, `acceptance`, `evidence`,
-  `previous_ids`, `archived_at`) are additive and optional. An old writer that
-  rewrites a record drops them, so mixed-version writers need a controlled
-  upgrade rather than coexistence.
-- Deliberate breaks from Go: `mv` moves tasks only (project rename lives under
-  `config project rename`); `external` provider stubs dropped; `@me` was never
-  implemented (help text only) and is gone.
+- The on-disk format is versioned, not negotiated. `store.json` carries
+  `format: 2`; anything else (missing `store.json`, a v0 `config.json`, or
+  top-level `*.json` task files) is refused with the reason, never read as an
+  empty store and written over. `tools/migrate-v0.py` is the one-way path.
+- Reading is lenient where leniency cannot hide a mistake: unknown fields and
+  unknown event `op`s are ignored, explicit `null` slices read as empty, and
+  legacy `cancelled` maps to `closed`. Unknown *intent* fields in `tk apply` are
+  rejected, because a misspelled key silently doing nothing is worse.
+- A v0 writer must not run against a v1 store: it would see zero tasks and
+  create v0 files beside the records. Stop old writers before cutting over.
+- Deliberate breaks from the 0.x line: project-prefixed IDs and `previous_ids`
+  are gone (identity is a ULID), `tk repair` became `tk recover`, `tk rm` became
+  `tk purge` (refuses while referenced), and `tk add` no longer bootstraps a
+  store.
 
 ## Code Standards
 
 | Aspect         | Standard                                                                 |
 | -------------- | ------------------------------------------------------------------------ |
-| Durability     | Atomic writes must `f.Sync()` file and dir before `rename`               |
-| Mutations      | Every write runs inside `Txn` (one advisory lock over resolve→read→validate→edit→persist). Never open two transactions on one store. |
-| Reads          | Read-only commands take no lock and never repair; `show` reports, `repair` fixes |
+| Durability     | Appends fsync the file (and the directory, when the record is new); `store.json` writes use temp-file + fsync + rename |
+| Locking        | `Store` = reads and lock-free appends (LWW/commutative ops). `Txn` = holds `<store>/.lock` and owns every composite operation: create, block, `--if-rev`, multi-record, apply. Never open two transactions on one store. |
+| Reads          | Take no lock and never repair; `show` reports, `check` reports for the store, `recover` truncates a torn tail |
+| Identity       | ULID + immutable alias; `project` is display only. Resolution: alias → ID → unique prefix |
+| Revision       | `rev` is `writer:line_count:content_hash8`; `--if-rev` compares under the lock so it means something |
+| Errors         | Store and input errors convert with `?`, not `into_diagnostic()` — the latter wraps them opaquely and loses `error_code` |
 | Precision      | RFC3339Nano stamps; calendar-day (not 24h) overdue math                  |
-| Error handling | `miette` diagnostics that read like what the user sees                   |
 | Testing        | `usage::test` harness for help drift; `assert_cmd` for end-to-end flows  |
 
 ## Verification Steps
@@ -74,7 +89,13 @@ Commands that must pass before any milestone:
 - **Format**: `cargo fmt --all --check`
 - **Unit + integration tests**: `cargo test --all-targets`
 - **Manual Check**: `tk ready` and `tk list -a` output verification
-- **Concurrency**: `cargo test --test cli concurrent` (real multi-process appends/labels; fails without the store lock)
+- **Concurrency**: `cargo test --test cli concurrent` — real multi-process appends,
+  plus a lock-held append that must proceed and a block that must wait
+- **Migration**: `cargo test --test migration` (needs `python3`; skips without it)
+
+Note for local runs: the concurrency tests spawn eight processes each, so
+`cargo test --all-targets -- --test-threads=3` avoids exhausting the process
+table on a busy machine.
 
 ## Distribution
 
