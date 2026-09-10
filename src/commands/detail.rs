@@ -5,15 +5,17 @@
 //! instead of copying them. Acceptance says what must be true to be done;
 //! evidence records how that was verified.
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
-use crate::format;
 use crate::model::TaskView;
 use crate::record::op;
 
 use super::Writer;
+
+fn rev_of(t: &TaskView) -> Option<String> {
+    Some(t.rev.clone())
+}
 
 /// Replace the current checkpoint (with no text, print it)
 #[derive(Args)]
@@ -36,42 +38,36 @@ impl RunWith<AppCtx> for Checkpoint {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let text = self.text.join(" ");
         if self.clear && !text.trim().is_empty() {
-            return Err(miette::miette!(
-                "provide checkpoint text or --clear, not both"
+            return Err(crate::output::invalid(
+                "provide checkpoint text or --clear, not both",
             ));
         }
         let writing = self.clear || !text.trim().is_empty();
         let writer = Writer::new(&ctx, self.if_rev.is_some())?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
-        let t = if writing {
-            writer
-                .store()
-                .check_rev(&id, self.if_rev.as_deref())
-                .into_diagnostic()?;
+        let id = writer.store().resolve(&self.id)?;
+        if writing {
+            writer.store().check_rev(&id, self.if_rev.as_deref())?;
             let value = (!self.clear).then_some(text);
             writer.append(&id, op::CHECKPOINT, serde_json::json!(value), None)?;
-            writer.view(&id)?
-        } else {
-            writer.view(&id)?
-        };
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            match &t.task.checkpoint {
-                Some(c) => println!("Checkpoint for {}:\n{c}", t.task.alias),
-                None => println!("No checkpoint set for {}.", t.task.alias),
-            }
         }
+        let t = writer.view(&id)?;
+        let human = match &t.task.checkpoint {
+            Some(c) => format!("Checkpoint for {}:\n{c}", t.task.alias),
+            None => format!("No checkpoint set for {}.", t.task.alias),
+        };
+        ctx.emit("checkpoint", &t, rev_of(&t), Vec::new(), || human);
         Ok(())
     }
 }
 
 /// Add links to relevant research, decisions, or source locations
+///
+/// A link is a document reference. Use `tk relate` for another task.
 #[derive(Args)]
 pub struct Link {
     /// Task alias, ID, or ID prefix
     pub id: String,
-    /// References to add (paths, URLs, task IDs); with none, list them
+    /// References to add (paths, URLs); with none, list them
     pub refs: Vec<String>,
 }
 
@@ -80,14 +76,13 @@ impl RunWith<AppCtx> for Link {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
-        let t = if self.refs.is_empty() {
-            writer.view(&id)?
-        } else {
+        let id = writer.store().resolve(&self.id)?;
+        if !self.refs.is_empty() {
             writer.append(&id, op::LINKS_ADD, serde_json::json!(self.refs), None)?;
-            writer.view(&id)?
-        };
-        print_field(&t, Field::Links, "Links", ctx.json);
+        }
+        let t = writer.view(&id)?;
+        let human = field_human(&t, Field::Links, "Links");
+        ctx.emit("link", &t, rev_of(&t), Vec::new(), || human);
         Ok(())
     }
 }
@@ -106,19 +101,23 @@ impl RunWith<AppCtx> for Unlink {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         if self.refs.is_empty() {
-            return Err(miette::miette!("provide at least one reference to remove"));
+            return Err(crate::output::invalid(
+                "provide at least one reference to remove",
+            ));
         }
         let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
+        let id = writer.store().resolve(&self.id)?;
         writer.append(&id, op::LINKS_REMOVE, serde_json::json!(self.refs), None)?;
-        print_field(&writer.view(&id)?, Field::Links, "Links", ctx.json);
+        let t = writer.view(&id)?;
+        let human = field_human(&t, Field::Links, "Links");
+        ctx.emit("unlink", &t, rev_of(&t), Vec::new(), || human);
         Ok(())
     }
 }
 
 /// Operations on one list-valued detail field.
 macro_rules! list_cmd {
-    ($name:ident, $field:expr, $label:literal, $doc:literal) => {
+    ($name:ident, $command:literal, $field:expr, $label:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(Args)]
         pub struct $name {
@@ -141,23 +140,22 @@ macro_rules! list_cmd {
                 let field = $field;
                 let label = $label;
                 if !self.values.is_empty() && (!self.remove.is_empty() || self.clear) {
-                    return Err(miette::miette!("add values or remove/clear them, not both"));
+                    return Err(crate::output::invalid(
+                        "add values or remove/clear them, not both",
+                    ));
                 }
                 let writer = Writer::new(&ctx, false)?;
-                let id = writer.store().resolve(&self.id).into_diagnostic()?;
-                let t = if self.clear {
+                let id = writer.store().resolve(&self.id)?;
+                if self.clear {
                     writer.append(&id, field.set_op(), serde_json::json!([]), None)?;
-                    writer.view(&id)?
                 } else if !self.remove.is_empty() {
                     writer.append(&id, field.remove_op(), serde_json::json!(self.remove), None)?;
-                    writer.view(&id)?
                 } else if !self.values.is_empty() {
                     writer.append(&id, field.add_op(), serde_json::json!(self.values), None)?;
-                    writer.view(&id)?
-                } else {
-                    writer.view(&id)?
-                };
-                print_field(&t, field, label, ctx.json);
+                }
+                let t = writer.view(&id)?;
+                let human = field_human(&t, field, label);
+                ctx.emit($command, &t, rev_of(&t), Vec::new(), || human);
                 Ok(())
             }
         }
@@ -166,12 +164,14 @@ macro_rules! list_cmd {
 
 list_cmd!(
     Accept,
+    "accept",
     Field::Acceptance,
     "Acceptance",
     "Add or show what must be true for this task to be done"
 );
 list_cmd!(
     Evidence,
+    "evidence",
     Field::Evidence,
     "Evidence",
     "Add or show how completion was verified"
@@ -194,30 +194,22 @@ impl RunWith<AppCtx> for Archive {
         // Locked: the "only terminal tasks archive" rule is checked against the
         // record, and a concurrent reopen must not slip between check and write.
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        txn.check_rev(&id, self.if_rev.as_deref())
-            .into_diagnostic()?;
-        let record = txn.load(&id).into_diagnostic()?;
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        txn.check_rev(&id, self.if_rev.as_deref())?;
+        let record = txn.load(&id)?;
         if !record.state.status.is_terminal() {
-            return Err(miette::miette!(
+            return Err(crate::output::invalid(format!(
                 "only done or closed tasks can be archived ({} is {})",
-                record.state.alias,
-                record.state.status
-            ));
+                record.state.alias, record.state.status
+            )));
         }
-        let t = if record.state.is_archived() {
-            txn.view_of(&id).into_diagnostic()?
-        } else {
-            txn.append(&id, op::ARCHIVED, serde_json::Value::Null)
-                .into_diagnostic()?;
-            txn.view_of(&id).into_diagnostic()?
-        };
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!("Archived {}.", t.task.alias);
+        if !record.state.is_archived() {
+            txn.append(&id, op::ARCHIVED, serde_json::Value::Null)?;
         }
+        let t = txn.view_of(&id)?;
+        let human = format!("Archived {}.", t.task.alias);
+        ctx.emit("archive", &t, rev_of(&t), Vec::new(), || human);
         Ok(())
     }
 }
@@ -234,17 +226,14 @@ impl RunWith<AppCtx> for Unarchive {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
+        let id = writer.store().resolve(&self.id)?;
         let t = writer.view(&id)?;
         if t.task.is_archived() {
             writer.append(&id, op::UNARCHIVED, serde_json::Value::Null, None)?;
         }
         let t = writer.view(&id)?;
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!("Unarchived {}.", t.task.alias);
-        }
+        let human = format!("Unarchived {}.", t.task.alias);
+        ctx.emit("unarchive", &t, rev_of(&t), Vec::new(), || human);
         Ok(())
     }
 }
@@ -288,18 +277,14 @@ impl Field {
     }
 }
 
-fn print_field(t: &TaskView, field: Field, label: &str, json: bool) {
-    if json {
-        println!("{}", format::format_json(t));
-        return;
-    }
+fn field_human(t: &TaskView, field: Field, label: &str) -> String {
     let values = field.values(&t.task);
     if values.is_empty() {
-        println!("No {label} recorded for {}.", t.task.alias);
-        return;
+        return format!("No {label} recorded for {}.", t.task.alias);
     }
-    println!("{label} ({}):", values.len());
+    let mut out = format!("{label} ({}):", values.len());
     for value in values {
-        println!("  - {value}");
+        out.push_str(&format!("\n  - {value}"));
     }
+    out
 }

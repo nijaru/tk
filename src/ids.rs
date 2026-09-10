@@ -28,6 +28,17 @@ pub enum IdError {
     NotFound(String),
 }
 
+impl miette::Diagnostic for IdError {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        let code = match self {
+            Self::NotFound(_) => crate::output::code::NOT_FOUND,
+            Self::Ambiguous { .. } => crate::output::code::AMBIGUOUS,
+            Self::BadProject(_) | Self::TooShort(_) => crate::output::code::INVALID_INPUT,
+        };
+        Some(Box::new(code))
+    }
+}
+
 /// Crockford base32: no `i`, `l`, `o`, or `u`, so IDs stay unambiguous.
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 

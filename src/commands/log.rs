@@ -1,10 +1,10 @@
 //! `tk log`
 
 use miette::IntoDiagnostic;
+
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
-use crate::format;
 use crate::model::LogEntry;
 use crate::record::op;
 
@@ -25,12 +25,12 @@ impl RunWith<AppCtx> for Log {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let msg = self.msg.join(" ");
         if msg.trim().is_empty() {
-            return Err(miette::miette!("log message cannot be empty"));
+            return Err(crate::output::invalid("log message cannot be empty"));
         }
         // Appending is commutative and cannot lose a concurrent writer's entry,
         // so eight agents can log to one task at once without a lock.
         let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
+        let id = writer.store().resolve(&self.id)?;
         let entry = LogEntry {
             ts: String::new(),
             msg: msg.clone(),
@@ -42,11 +42,8 @@ impl RunWith<AppCtx> for Log {
             None,
         )?;
         let t = writer.view(&id)?;
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!("Logged to {}: {msg}", t.task.alias);
-        }
+        let human = format!("Logged to {}: {msg}", t.task.alias);
+        ctx.emit("log", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }

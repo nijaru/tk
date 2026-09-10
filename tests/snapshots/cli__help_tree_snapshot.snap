@@ -12,6 +12,7 @@ Usage: tk [FLAGS] <SUBCOMMAND>
 Commands:
   accept      Add or show acceptance criteria
   add         Create a task
+  apply       Apply a batch of intents from stdin under one lock
   archive     Archive a done/closed task without deleting it
   block       Add a blocker dependency
   check       Check store integrity (non-zero exit on findings)
@@ -297,13 +298,15 @@ Global flags:
                          (no discovery)
 
 === tk link ===
-Add links to research, decisions, or source locations
+Add links to relevant research, decisions, or source locations
+
+A link is a document reference. Use `tk relate` for another task.
 
 Usage: tk link <ID> [REFS]…
 
 Arguments:
   <ID>     Task alias, ID, or ID prefix
-  [REFS]…  References to add (paths, URLs, task IDs); with none, list them
+  [REFS]…  References to add (paths, URLs); with none, list them
 
 Flags:
   -h, --help             Print help
@@ -559,6 +562,26 @@ Arguments:
   <PROJECT>  Target project name
 
 Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk apply ===
+Apply a batch of intents from stdin under one lock
+
+Every intent is resolved and validated before anything is written, so a batch
+that is wrong is rejected whole. Intents run in order; see `tk apply --help` in
+the README for the accepted `op` values.
+
+Usage: tk apply [--dry-run]
+
+Flags:
+      --dry-run          Validate the batch and report what would change,
+                         without writing
   -h, --help             Print help
 
 Global flags:

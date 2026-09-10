@@ -1,13 +1,16 @@
-//! `tk block` / `tk unblock`
+//! `tk block` / `tk unblock` / `tk relate` / `tk unrelate`
 //!
 //! Existence and cycle checks run inside the same transaction as the write, so
 //! a concurrent graph change cannot invalidate the validation.
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
-use crate::format;
+
+/// Shorten an unresolvable reference for human output.
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
 
 /// Add a blocker dependency
 #[derive(Args)]
@@ -23,27 +26,26 @@ impl RunWith<AppCtx> for Block {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        let blocker = txn.resolve(&self.blocker).into_diagnostic()?;
-        let blocker_label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        let blocker = txn.resolve(&self.blocker)?;
+        let label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
         if txn
-            .load(&id)
-            .into_diagnostic()?
+            .load(&id)?
             .state
             .blocked_by
             .iter()
             .any(|b| b == &blocker)
         {
-            println!("Task {id} is already blocked by {blocker_label}");
+            let human = format!("Task {id} is already blocked by {label}");
+            ctx.emit("block", &serde_json::Value::Null, None, Vec::new(), || {
+                human
+            });
             return Ok(());
         }
-        let t = txn.add_blocker(&id, &blocker).into_diagnostic()?;
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!("Blocked {} by {blocker_label}", t.task.alias);
-        }
+        let t = txn.add_blocker(&id, &blocker)?;
+        let human = format!("Blocked {} by {label}", t.task.alias);
+        ctx.emit("block", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }
@@ -62,20 +64,17 @@ impl RunWith<AppCtx> for Unblock {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        let blocker = txn.resolve(&self.blocker).into_diagnostic()?;
-        let blocker_label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
-        let (t, found) = txn.remove_blocker(&id, &blocker).into_diagnostic()?;
-        if !found {
-            println!("Task {} is not blocked by {blocker_label}", t.task.alias);
-            return Ok(());
-        }
-        if ctx.json {
-            println!("{}", format::format_json(&t));
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        let blocker = txn.resolve(&self.blocker)?;
+        let label = txn.alias_of(&blocker).unwrap_or_else(|| short(&blocker));
+        let (t, found) = txn.remove_blocker(&id, &blocker)?;
+        let human = if found {
+            format!("Unblocked {} from {label}", t.task.alias)
         } else {
-            println!("Unblocked {} from {blocker_label}", t.task.alias);
-        }
+            format!("Task {} is not blocked by {label}", t.task.alias)
+        };
+        ctx.emit("unblock", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }
@@ -97,19 +96,13 @@ impl RunWith<AppCtx> for Relate {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        let other = txn.resolve(&self.other).into_diagnostic()?;
-        let t = txn.add_related(&id, &other).into_diagnostic()?;
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!(
-                "Related {} to {}",
-                t.task.alias,
-                txn.alias_of(&other).unwrap_or_else(|| short(&other))
-            );
-        }
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        let other = txn.resolve(&self.other)?;
+        let label = txn.alias_of(&other).unwrap_or_else(|| short(&other));
+        let t = txn.add_related(&id, &other)?;
+        let human = format!("Related {} to {label}", t.task.alias);
+        ctx.emit("relate", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }
@@ -128,32 +121,17 @@ impl RunWith<AppCtx> for Unrelate {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        let other = txn.resolve(&self.other).into_diagnostic()?;
-        let (t, found) = txn.remove_related(&id, &other).into_diagnostic()?;
-        if !found {
-            println!(
-                "{} is not related to {}",
-                t.task.alias,
-                txn.alias_of(&other).unwrap_or_else(|| short(&other))
-            );
-            return Ok(());
-        }
-        if ctx.json {
-            println!("{}", format::format_json(&t));
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        let other = txn.resolve(&self.other)?;
+        let label = txn.alias_of(&other).unwrap_or_else(|| short(&other));
+        let (t, found) = txn.remove_related(&id, &other)?;
+        let human = if found {
+            format!("Unrelated {} from {label}", t.task.alias)
         } else {
-            println!(
-                "Unrelated {} from {}",
-                t.task.alias,
-                txn.alias_of(&other).unwrap_or_else(|| short(&other))
-            );
-        }
+            format!("{} is not related to {label}", t.task.alias)
+        };
+        ctx.emit("unrelate", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
-}
-
-/// Display an ID compactly in human output.
-fn short(id: &str) -> String {
-    id.chars().take(8).collect()
 }

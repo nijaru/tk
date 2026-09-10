@@ -4,13 +4,12 @@
 //! concurrent adds must not be able to pick the same one. `add` never creates a
 //! store — `tk init` is the only command that does.
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Priority;
 use crate::store::CreateOptions;
-use crate::{format, timeutil};
+use crate::timeutil;
 
 /// Create a task
 #[derive(Args)]
@@ -48,50 +47,36 @@ impl RunWith<AppCtx> for Add {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let priority = self
-            .priority
-            .map(|p| Priority::parse(&p))
-            .transpose()
-            .into_diagnostic()?;
+        let priority = self.priority.map(|p| Priority::parse(&p)).transpose()?;
         let due_date = self
             .due
             .map(|d| timeutil::parse_due_date(&d))
-            .transpose()
-            .into_diagnostic()?
+            .transpose()?
             .flatten();
 
         // Resolution, parent validation, and the write share one transaction,
         // so a concurrent purge cannot invalidate the parent it checked.
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let parent = self
-            .parent
-            .map(|p| txn.resolve(&p))
-            .transpose()
-            .into_diagnostic()?;
+        let txn = ctx.store.txn()?;
+        let parent = self.parent.map(|p| txn.resolve(&p)).transpose()?;
 
         let labels = (!self.labels.is_empty()).then_some(self.labels);
         let assignees = (!self.assignees.is_empty()).then_some(self.assignees);
 
-        let t = txn
-            .create(CreateOptions {
-                title: self.title.join(" "),
-                description: self.desc,
-                priority,
-                project: self.project,
-                labels,
-                assignees,
-                parent,
-                estimate: self.estimate,
-                due_date,
-            })
-            .into_diagnostic()?;
+        let t = txn.create(CreateOptions {
+            title: self.title.join(" "),
+            description: self.desc,
+            priority,
+            project: self.project,
+            labels,
+            assignees,
+            parent,
+            estimate: self.estimate,
+            due_date,
+        })?;
 
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!("Created task {} ({})", t.task.alias, t.task.id);
-        }
+        let human = format!("Created task {} ({})", t.task.alias, t.task.id);
+        ctx.emit("add", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }

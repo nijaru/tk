@@ -9,6 +9,7 @@ use usage::{Args, RunWith};
 use crate::cli::AppCtx;
 use crate::format;
 use crate::ids;
+use crate::output::code;
 use crate::record::op;
 use crate::store::{self, StoreLock};
 
@@ -38,20 +39,19 @@ impl RunWith<AppCtx> for Purge {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = txn.resolve(&self.id).into_diagnostic()?;
-        txn.check_rev(&id, self.if_rev.as_deref())
-            .into_diagnostic()?;
-        let record = txn.load(&id).into_diagnostic()?;
+        let txn = ctx.store.txn()?;
+        let id = txn.resolve(&self.id)?;
+        txn.check_rev(&id, self.if_rev.as_deref())?;
+        let record = txn.load(&id)?;
 
         if !self.force {
             // Never delete unattended: a script or agent that forgets -f gets an
             // error, not a silent removal.
             if !std::io::stdin().is_terminal() {
-                return Err(miette::miette!(
+                return Err(crate::output::invalid(format!(
                     "refusing to delete {} without -f (stdin is not a terminal)",
                     record.state.alias
-                ));
+                )));
             }
             print!(
                 "Delete {} {:?}? [y/N] ",
@@ -65,27 +65,24 @@ impl RunWith<AppCtx> for Purge {
                 .read_line(&mut line)
                 .into_diagnostic()?;
             if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-                println!("Aborted.");
+                ctx.emit("purge", &serde_json::Value::Null, None, Vec::new(), || {
+                    "Aborted.".to_owned()
+                });
                 return Ok(());
             }
         }
 
-        let out = txn.purge(&id, self.scrub).into_diagnostic()?;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "deleted": out.deleted,
-                    "references_scrubbed": out.references_scrubbed,
-                    "referrers": out.referrers,
-                }))
-            );
-        } else {
-            println!(
-                "Deleted {} (scrubbed {} references)",
-                out.deleted, out.references_scrubbed
-            );
-        }
+        let out = txn.purge(&id, self.scrub)?;
+        let data = serde_json::json!({
+            "deleted": out.deleted,
+            "references_scrubbed": out.references_scrubbed,
+            "referrers": out.referrers,
+        });
+        let human = format!(
+            "Deleted {} (scrubbed {} references)",
+            out.deleted, out.references_scrubbed
+        );
+        ctx.emit("purge", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
@@ -111,7 +108,7 @@ impl RunWith<AppCtx> for Init {
                     "task store already initialized at {}",
                     ctx.store.tasks_dir.display()
                 )),
-                Err(e) => Err(e).into_diagnostic(),
+                Err(e) => Err(e.into()),
             };
         }
         let name = match self.project {
@@ -124,30 +121,25 @@ impl RunWith<AppCtx> for Init {
                 .filter(|s| s != "." && s != "/")
                 .unwrap_or_else(|| "tk".to_owned()),
         };
-        ids::validate_project(&name).into_diagnostic()?;
+        ids::validate_project(&name)?;
         // Creating the store is deliberate: an explicit --tasks-dir is allowed
         // to come into existence here, and only here.
-        let txn = ctx.store.txn_init().into_diagnostic()?;
+        let txn = ctx.store.txn_init()?;
         let config = crate::model::Config {
             project: name,
             ..Default::default()
         };
-        txn.init_store(&config).into_diagnostic()?;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "tasks_dir": ctx.store.tasks_dir.display().to_string(),
-                    "format": config.format,
-                    "project": config.project,
-                }))
-            );
-        } else {
-            println!(
-                "Initialized empty tk project in {}",
-                ctx.store.tasks_dir.display()
-            );
-        }
+        txn.init_store(&config)?;
+        let data = serde_json::json!({
+            "tasks_dir": ctx.store.tasks_dir.display().to_string(),
+            "format": config.format,
+            "project": config.project,
+        });
+        let human = format!(
+            "Initialized empty tk project in {}",
+            ctx.store.tasks_dir.display()
+        );
+        ctx.emit("init", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
@@ -168,9 +160,9 @@ impl RunWith<AppCtx> for Mv {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ids::validate_project(&self.project).into_diagnostic()?;
+        ids::validate_project(&self.project)?;
         let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.source).into_diagnostic()?;
+        let id = writer.store().resolve(&self.source)?;
         let record = writer.load(&id)?;
         if record.state.project == self.project {
             return Err(miette::miette!(
@@ -181,14 +173,11 @@ impl RunWith<AppCtx> for Mv {
         }
         writer.append(&id, op::PROJECT, serde_json::json!(self.project), None)?;
         let t = writer.view(&id)?;
-        if ctx.json {
-            println!("{}", format::format_json(&t));
-        } else {
-            println!(
-                "Moved {} ({}) to project {}",
-                t.task.alias, t.task.id, t.task.project
-            );
-        }
+        let human = format!(
+            "Moved {} ({}) to project {}",
+            t.task.alias, t.task.id, t.task.project
+        );
+        ctx.emit("mv", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())
     }
 }
@@ -211,10 +200,10 @@ impl RunWith<AppCtx> for Clean {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let config = ctx.store.load_config().into_diagnostic()?;
+        let config = ctx.store.load_config()?;
         let days = if let Some(n) = self.older_than {
             if n < 0 {
-                return Err(miette::miette!("--older-than must be non-negative"));
+                return Err(crate::output::invalid("--older-than must be non-negative"));
             }
             n
         } else if config.clean_after.enabled || self.force {
@@ -225,34 +214,31 @@ impl RunWith<AppCtx> for Clean {
                 d
             }
         } else {
-            println!(
-                "Auto-clean is disabled. Use --older-than N or enable with 'tk config clean-after enable'."
-            );
+            ctx.emit("clean", &serde_json::Value::Null, None, Vec::new(), || {
+                "Auto-clean is disabled. Use --older-than N or enable with 'tk config clean-after enable'.".to_owned()
+            });
             return Ok(());
         };
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let out = txn.clean(days, self.purge).into_diagnostic()?;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "archived": out.archived,
-                    "purged": out.purged,
-                    "references_scrubbed": out.references_scrubbed,
-                    "days": days,
-                }))
-            );
-        } else if self.purge {
-            println!(
+        let txn = ctx.store.txn()?;
+        let out = txn.clean(days, self.purge)?;
+        let data = serde_json::json!({
+            "archived": out.archived,
+            "purged": out.purged,
+            "references_scrubbed": out.references_scrubbed,
+            "days": days,
+        });
+        let human = if self.purge {
+            format!(
                 "Purged {} tasks completed more than {days} days ago (scrubbed {} references).",
                 out.purged, out.references_scrubbed
-            );
+            )
         } else {
-            println!(
+            format!(
                 "Archived {} tasks completed more than {days} days ago. Use --purge to delete them.",
                 out.archived
-            );
-        }
+            )
+        };
+        ctx.emit("clean", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
@@ -269,30 +255,33 @@ impl RunWith<AppCtx> for Check {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let issues = store::check_integrity(&ctx.store).into_diagnostic()?;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "ok": issues.is_empty(),
-                    "issues": issues,
-                }))
-            );
-        } else if issues.is_empty() {
-            println!("No integrity issues found.");
-        } else {
-            for issue in &issues {
-                println!("{}", format::warning(issue, ctx.color));
-            }
-        }
+        let issues = store::check_integrity(&ctx.store)?;
         if issues.is_empty() {
-            Ok(())
-        } else {
-            Err(miette::miette!(
-                "integrity check failed: {} issue(s)",
-                issues.len()
-            ))
+            ctx.emit(
+                "check",
+                &serde_json::json!({"ok": true, "issues": []}),
+                None,
+                Vec::new(),
+                || "No integrity issues found.".to_owned(),
+            );
+            return Ok(());
         }
+        let summary = format!("integrity check failed: {} issue(s)", issues.len());
+        if ctx.json {
+            // Report the findings structurally, then exit non-zero without a
+            // second envelope.
+            return Err(ctx.fail(
+                "check",
+                code::CHECK_FAILED,
+                &summary,
+                &serde_json::json!({"ok": false, "issues": issues}),
+                issues,
+            ));
+        }
+        for issue in &issues {
+            println!("{}", format::warning(issue, ctx.color));
+        }
+        Err(crate::output::Reported(summary).into())
     }
 }
 
@@ -314,39 +303,30 @@ impl RunWith<AppCtx> for Recover {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ctx.require_store()?;
-        let txn = ctx.store.txn().into_diagnostic()?;
-        let id = self
-            .id
-            .map(|input| txn.resolve(&input))
-            .transpose()
-            .into_diagnostic()?;
-        let out = txn.recover(id.as_deref(), self.dry_run).into_diagnostic()?;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "repaired": out.repaired,
-                    "bytes_dropped": out.bytes_dropped,
-                    "dry_run": out.dry_run,
-                }))
-            );
-        } else if out.repaired.is_empty() {
-            println!("No torn records found.");
-        } else if self.dry_run {
-            println!(
-                "Would repair {} record(s), dropping {} byte(s): {}",
-                out.repaired.len(),
-                out.bytes_dropped,
-                out.repaired.join(", ")
-            );
+        let txn = ctx.store.txn()?;
+        let id = self.id.map(|input| txn.resolve(&input)).transpose()?;
+        let out = txn.recover(id.as_deref(), self.dry_run)?;
+        let data = serde_json::json!({
+            "repaired": out.repaired,
+            "bytes_dropped": out.bytes_dropped,
+            "dry_run": out.dry_run,
+        });
+        let human = if out.repaired.is_empty() {
+            "No torn records found.".to_owned()
         } else {
-            println!(
-                "Repaired {} record(s), dropping {} byte(s): {}",
+            format!(
+                "{} {} record(s), dropping {} byte(s): {}",
+                if self.dry_run {
+                    "Would repair"
+                } else {
+                    "Repaired"
+                },
                 out.repaired.len(),
                 out.bytes_dropped,
                 out.repaired.join(", ")
-            );
-        }
+            )
+        };
+        ctx.emit("recover", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
@@ -360,20 +340,15 @@ impl RunWith<AppCtx> for StorePath {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let s = &ctx.store;
-        if ctx.json {
-            println!(
-                "{}",
-                format::format_json(&serde_json::json!({
-                    "tasks_dir": s.tasks_dir.display().to_string(),
-                    "root": s.root.display().to_string(),
-                    "exists": s.exists,
-                    "source": s.source.name(),
-                    "worktree": s.worktree,
-                }))
-            );
-        } else {
-            println!("{}", s.tasks_dir.display());
-        }
+        let data = serde_json::json!({
+            "tasks_dir": s.tasks_dir.display().to_string(),
+            "root": s.root.display().to_string(),
+            "exists": s.exists,
+            "source": s.source.name(),
+            "worktree": s.worktree,
+        });
+        let human = s.tasks_dir.display().to_string();
+        ctx.emit("path", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
@@ -398,18 +373,18 @@ impl RunWith<AppCtx> for Lock {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         if self.command.is_empty() {
-            return Err(miette::miette!(
-                "provide a command after --, for example: tk lock -- git pull --ff-only"
+            return Err(crate::output::invalid(
+                "provide a command after --, for example: tk lock -- git pull --ff-only",
             ));
         }
 
         let stores: Vec<store::Ctx> = if self.scan.is_empty() {
-            ctx.store.require().into_diagnostic()?;
+            ctx.store.require()?;
             vec![ctx.store.clone()]
         } else {
             let mut found = Vec::new();
             for dir in &self.scan {
-                found.extend(store::find_stores(std::path::Path::new(dir)).into_diagnostic()?);
+                found.extend(store::find_stores(std::path::Path::new(dir))?);
             }
             let mut stores: Vec<store::Ctx> = found
                 .into_iter()
@@ -432,8 +407,7 @@ impl RunWith<AppCtx> for Lock {
         let guards: Vec<StoreLock> = stores
             .iter()
             .map(|c| c.lock_store())
-            .collect::<Result<_, _>>()
-            .into_diagnostic()?;
+            .collect::<Result<_, _>>()?;
 
         let status = std::process::Command::new(&self.command[0])
             .args(&self.command[1..])

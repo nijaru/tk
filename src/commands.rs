@@ -1,6 +1,7 @@
 //! Subcommand implementations.
 
 mod add;
+mod batch;
 mod config;
 mod deps;
 mod detail;
@@ -12,6 +13,7 @@ mod show;
 mod status;
 
 pub use add::Add;
+pub use batch::Apply;
 pub use config::Config;
 pub use deps::{Block, Relate, Unblock, Unrelate};
 pub use detail::{Accept, Archive, Checkpoint, Evidence, Link, Unarchive, Unlink};
@@ -22,8 +24,6 @@ pub use misc::{Check, Clean, Init, Lock, Mv, Purge, Recover, StorePath};
 pub use show::Show;
 pub use status::{Close, Defer, Done, Open, Start};
 
-use miette::IntoDiagnostic;
-
 use crate::cli::AppCtx;
 use crate::model::TaskView;
 use crate::store;
@@ -32,8 +32,8 @@ use crate::store;
 ///
 /// Read-only callers use this; mutations resolve inside their transaction.
 pub fn resolve(ctx: &AppCtx, input: &str) -> miette::Result<String> {
-    let store = ctx.store.store().into_diagnostic()?;
-    store.resolve(input).into_diagnostic()
+    let store = ctx.store.store()?;
+    Ok(store.resolve(input)?)
 }
 
 /// One mutation path, chosen once per command.
@@ -50,7 +50,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn new(ctx: &'a AppCtx, needs_lock: bool) -> miette::Result<Self> {
         ctx.require_store()?;
         if needs_lock {
-            let txn = ctx.store.txn().into_diagnostic()?;
+            let txn = ctx.store.txn()?;
             let store = store::Store::new(txn.ctx());
             Ok(Self {
                 store,
@@ -58,7 +58,7 @@ impl<'a> Writer<'a> {
             })
         } else {
             Ok(Self {
-                store: ctx.store.store().into_diagnostic()?,
+                store: ctx.store.store()?,
                 txn: None,
             })
         }
@@ -83,28 +83,67 @@ impl<'a> Writer<'a> {
     ) -> miette::Result<()> {
         match &self.txn {
             Some(txn) => {
-                txn.append_if_rev(id, op, data, expect_rev)
-                    .into_diagnostic()?;
+                txn.append_if_rev(id, op, data, expect_rev)?;
             }
             None => {
-                self.store.append(id, op, data).into_diagnostic()?;
+                self.store.append(id, op, data)?;
             }
         }
         Ok(())
     }
 
     pub(crate) fn view(&self, id: &str) -> miette::Result<TaskView> {
-        self.store.view_of(id).into_diagnostic()
+        Ok(self.store.view_of(id)?)
     }
 
     pub(crate) fn load(&self, id: &str) -> miette::Result<crate::record::Record> {
-        self.store.load(id).into_diagnostic()
+        Ok(self.store.load(id)?)
     }
 }
 
 impl AppCtx {
     /// Require an existing v1 store, with the format gate applied.
     pub(crate) fn require_store(&self) -> miette::Result<()> {
-        self.store.require().into_diagnostic()
+        Ok(self.store.require()?)
+    }
+
+    /// Emit a result in the shape the caller asked for.
+    ///
+    /// `--json` always produces the same envelope (see [`crate::output`]);
+    /// otherwise the human rendering is built lazily, so JSON runs never pay
+    /// for it.
+    pub(crate) fn emit<T: serde::Serialize>(
+        &self,
+        command: &str,
+        data: &T,
+        rev: Option<String>,
+        issues: Vec<String>,
+        human: impl FnOnce() -> String,
+    ) {
+        if self.json {
+            let data = serde_json::to_value(data).unwrap_or(serde_json::Value::Null);
+            let envelope = crate::output::ok(command, data, rev, issues);
+            println!("{}", crate::format::format_json(&envelope));
+        } else {
+            println!("{}", human());
+        }
+    }
+
+    /// Emit a failure the command decided how to name, then exit non-zero.
+    pub(crate) fn fail<T: serde::Serialize>(
+        &self,
+        command: &str,
+        error_code: &str,
+        message: &str,
+        data: &T,
+        issues: Vec<String>,
+    ) -> miette::Report {
+        if self.json {
+            let mut envelope = crate::output::err(command, error_code, message);
+            envelope.data = serde_json::to_value(data).unwrap_or(serde_json::Value::Null);
+            envelope.issues = issues;
+            println!("{}", crate::format::format_json(&envelope));
+        }
+        crate::output::Reported(message.to_owned()).into()
     }
 }

@@ -21,6 +21,12 @@ pub enum DateError {
     BadRelative(String),
 }
 
+impl miette::Diagnostic for DateError {
+    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
+        Some(Box::new(crate::output::code::INVALID_INPUT))
+    }
+}
+
 /// Parse a due-date flag. Returns `Ok(None)` for `""`/`"-"` (clear signal).
 pub fn parse_due_date(input: &str) -> Result<Option<String>, DateError> {
     if input.is_empty() || input == "-" {

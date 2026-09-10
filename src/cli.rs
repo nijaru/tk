@@ -88,6 +88,8 @@ pub enum Commands {
     Recover(crate::commands::Recover),
     /// Move a task to a different project
     Mv(crate::commands::Mv),
+    /// Apply a batch of intents from stdin under one lock
+    Apply(crate::commands::Apply),
     /// Remove old completed tasks (archives by default)
     Clean(crate::commands::Clean),
     /// Check store integrity (non-zero exit on findings)
@@ -101,14 +103,86 @@ pub enum Commands {
 }
 
 pub fn run() -> miette::Result<()> {
-    use miette::IntoDiagnostic;
     let cli = Cli::parse();
-    let store =
-        StoreCtx::resolve(cli.dir.as_deref(), cli.tasks_dir.as_deref()).into_diagnostic()?;
-    let ctx = AppCtx {
-        store,
-        json: cli.json,
-        color: crate::format::use_color(),
-    };
-    cli.run_command_with(ctx)
+    let json = cli.json;
+    // Captured before the command is consumed by dispatch.
+    let command = cli.command.name();
+    // Store errors convert through `?` rather than `into_diagnostic()`, which
+    // would hide the concrete error type and lose the failure's kind.
+    let result: miette::Result<()> = (|| {
+        let store = StoreCtx::resolve(cli.dir.as_deref(), cli.tasks_dir.as_deref())?;
+        let ctx = AppCtx {
+            store,
+            json,
+            color: crate::format::use_color(),
+        };
+        cli.run_command_with(ctx)
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // A failing `--json` run still answers in the same envelope, so a
+            // caller never has to parse stderr to find out what happened.
+            if json && err.downcast_ref::<crate::output::Reported>().is_none() {
+                let code = error_code(&err);
+                let envelope = crate::output::err(command, &code, &format!("{err}"));
+                println!("{}", crate::format::format_json(&envelope));
+            }
+            Err(err)
+        }
+    }
+}
+
+/// The failure's kind, for the JSON envelope.
+///
+/// Tries the concrete error first, then whatever miette carries, so a store
+/// failure keeps its specific kind instead of collapsing to `error`.
+fn error_code(err: &miette::Report) -> String {
+    if let Some(store_error) = err.downcast_ref::<crate::store::StoreError>() {
+        return store_error.code().to_owned();
+    }
+    match err.code() {
+        Some(code) => code.to_string(),
+        None => crate::output::code::ERROR.to_owned(),
+    }
+}
+
+impl Commands {
+    /// The invoked subcommand's name, for the JSON envelope.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Init(_) => "init",
+            Self::Add(_) => "add",
+            Self::List(_) => "list",
+            Self::Ready(_) => "ready",
+            Self::Show(_) => "show",
+            Self::Start(_) => "start",
+            Self::Open(_) => "open",
+            Self::Defer(_) => "defer",
+            Self::Done(_) => "done",
+            Self::Close(_) => "close",
+            Self::Edit(_) => "edit",
+            Self::Checkpoint(_) => "checkpoint",
+            Self::Link(_) => "link",
+            Self::Unlink(_) => "unlink",
+            Self::Accept(_) => "accept",
+            Self::Evidence(_) => "evidence",
+            Self::Archive(_) => "archive",
+            Self::Unarchive(_) => "unarchive",
+            Self::Log(_) => "log",
+            Self::Block(_) => "block",
+            Self::Unblock(_) => "unblock",
+            Self::Relate(_) => "relate",
+            Self::Unrelate(_) => "unrelate",
+            Self::Purge(_) => "purge",
+            Self::Recover(_) => "recover",
+            Self::Mv(_) => "mv",
+            Self::Apply(_) => "apply",
+            Self::Clean(_) => "clean",
+            Self::Check(_) => "check",
+            Self::Path(_) => "path",
+            Self::Lock(_) => "lock",
+            Self::Config(_) => "config",
+        }
+    }
 }

@@ -478,6 +478,12 @@ pub enum ModelError {
     BadPriority(String),
 }
 
+impl miette::Diagnostic for ModelError {
+    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        Some(Box::new(crate::output::code::INVALID_INPUT))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

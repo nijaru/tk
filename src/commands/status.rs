@@ -5,18 +5,16 @@
 //! one is the status. `completed_at` is derived during the fold from the
 //! transition itself, so it can never disagree with the status.
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
-use crate::format;
 use crate::model::Status;
 use crate::record::op;
 
 use super::Writer;
 
 macro_rules! status_cmd {
-    ($name:ident, $status:expr, $verb:literal, $doc:literal) => {
+    ($name:ident, $command:literal, $status:expr, $verb:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(Args)]
         pub struct $name {
@@ -29,14 +27,11 @@ macro_rules! status_cmd {
 
             fn run_with(self, ctx: AppCtx) -> Self::Output {
                 let writer = Writer::new(&ctx, false)?;
-                let id = writer.store().resolve(&self.id).into_diagnostic()?;
+                let id = writer.store().resolve(&self.id)?;
                 writer.append(&id, op::STATUS, serde_json::json!($status), None)?;
                 let t = writer.view(&id)?;
-                if ctx.json {
-                    println!("{}", format::format_json(&t));
-                } else {
-                    println!("{} {}: {}", $verb, t.task.alias, t.task.title);
-                }
+                let human = format!("{} {}: {}", $verb, t.task.alias, t.task.title);
+                ctx.emit($command, &t, Some(t.rev.clone()), Vec::new(), || human);
                 Ok(())
             }
         }
@@ -45,16 +40,24 @@ macro_rules! status_cmd {
 
 status_cmd!(
     Start,
+    "start",
     Status::Active,
     "Started",
     "Start working on a task (open → active)"
 );
 status_cmd!(
     Open,
+    "open",
     Status::Open,
     "Set to open",
     "Reset a task status to open"
 );
-status_cmd!(Defer, Status::Deferred, "Deferred", "Defer a task");
-status_cmd!(Done, Status::Done, "Completed", "Complete a task");
-status_cmd!(Close, Status::Closed, "Closed", "Close/cancel a task");
+status_cmd!(Defer, "defer", Status::Deferred, "Deferred", "Defer a task");
+status_cmd!(Done, "done", Status::Done, "Completed", "Complete a task");
+status_cmd!(
+    Close,
+    "close",
+    Status::Closed,
+    "Closed",
+    "Close/cancel a task"
+);

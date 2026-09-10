@@ -11,13 +11,12 @@
 //! `+label` / `-label` are deltas and stay lock-free, so concurrent agents can
 //! each add their own label without losing anyone's edit.
 
-use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Priority;
 use crate::record::op;
-use crate::{format, timeutil};
+use crate::timeutil;
 
 use super::Writer;
 
@@ -74,22 +73,19 @@ impl RunWith<AppCtx> for Edit {
             self.if_rev.is_some() || self.parent.is_some() || replaces_labels || replaces_assignees;
 
         let writer = Writer::new(&ctx, needs_lock)?;
-        let id = writer.store().resolve(&self.id).into_diagnostic()?;
+        let id = writer.store().resolve(&self.id)?;
 
         // One conditional check for the whole edit. Checking per append would
         // reject the second field of a legitimate multi-field edit, because the
         // first append already moved the revision. The lock is held throughout,
         // so a single check still means "nothing changed since I read it".
-        writer
-            .store()
-            .check_rev(&id, self.if_rev.as_deref())
-            .into_diagnostic()?;
+        writer.store().check_rev(&id, self.if_rev.as_deref())?;
 
         if let Some(title) = self.title {
             writer.append(&id, op::TITLE, serde_json::json!(title), None)?;
         }
         if let Some(priority) = self.priority {
-            let p = Priority::parse(&priority).into_diagnostic()?;
+            let p = Priority::parse(&priority)?;
             writer.append(&id, op::PRIORITY, serde_json::json!(p as u8), None)?;
         }
         if let Some(desc) = self.desc {
@@ -101,7 +97,7 @@ impl RunWith<AppCtx> for Edit {
             writer.append(&id, op::ESTIMATE, serde_json::json!(value), None)?;
         }
         if let Some(due) = self.due {
-            let parsed = timeutil::parse_due_date(&due).into_diagnostic()?;
+            let parsed = timeutil::parse_due_date(&due)?;
             writer.append(&id, op::DUE_DATE, serde_json::json!(parsed), None)?;
         }
 
@@ -123,23 +119,26 @@ impl RunWith<AppCtx> for Edit {
             if parent == "-" {
                 writer.append(&id, op::PARENT_CLEAR, serde_json::Value::Null, None)?;
             } else {
-                let pid = writer.store().resolve(&parent).into_diagnostic()?;
+                let pid = writer.store().resolve(&parent)?;
                 // Validate existence and acyclicity in the same transaction as
                 // the write. `Writer::new` took the lock for exactly this case,
                 // so opening a second transaction here would deadlock.
                 let txn = writer.txn().ok_or_else(|| {
-                    miette::miette!("internal error: a parent change needs the store lock")
+                    crate::output::invalid("internal error: a parent change needs the store lock")
                 })?;
-                txn.set_parent(&id, Some(&pid)).into_diagnostic()?;
+                txn.set_parent(&id, Some(&pid))?;
             }
         }
 
         let updated = writer.view(&id)?;
-        if ctx.json {
-            println!("{}", format::format_json(&updated));
-        } else {
-            println!("Updated {}: {}", updated.task.alias, updated.task.title);
-        }
+        let human = format!("Updated {}: {}", updated.task.alias, updated.task.title);
+        ctx.emit(
+            "edit",
+            &updated,
+            Some(updated.rev.clone()),
+            Vec::new(),
+            || human,
+        );
         Ok(())
     }
 }

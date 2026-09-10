@@ -25,6 +25,7 @@ use thiserror::Error;
 
 use crate::ids::{self, IdError};
 use crate::model::{self, Config, Priority, Status, TaskState, TaskView};
+use crate::output::code;
 use crate::record::{self, Event, Record, op};
 use crate::timeutil;
 
@@ -56,6 +57,11 @@ pub enum StoreError {
     },
     #[error("task title cannot be empty")]
     EmptyTitle,
+    /// The request or command line itself is wrong (bad batch intent, a guard
+    /// that needs a flag). Distinct from a store failure, so a caller can fix
+    /// its input rather than retry.
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("could not allocate a unique alias after {0} attempts")]
     AliasCollisions(u32),
     #[error("io: {0}")]
@@ -69,6 +75,34 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+impl miette::Diagnostic for StoreError {
+    /// Lets a `--json` failure carry its kind through miette's report wrapper.
+    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
+        Some(Box::new(StoreError::code(self)))
+    }
+}
+
+impl StoreError {
+    /// Stable machine-readable kind, used as the JSON envelope's `error_code`
+    /// so a caller can branch on the failure without reading prose.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TasksNotFound(_) | Self::ExplicitStoreMissing { .. } => code::STORE_NOT_FOUND,
+            Self::NotV1Store { .. } => code::NOT_A_V1_STORE,
+            Self::TaskNotFound(_) => code::NOT_FOUND,
+            Self::StaleRevision { .. } => code::STALE_REVISION,
+            Self::EmptyTitle | Self::AliasCollisions(_) => code::INVALID_INPUT,
+            Self::InvalidInput(_) => code::INVALID_INPUT,
+            Self::Io(_) => code::IO,
+            Self::Parse { .. } => code::PARSE,
+            Self::Id(IdError::NotFound(_)) => code::NOT_FOUND,
+            Self::Id(IdError::Ambiguous { .. }) => code::AMBIGUOUS,
+            Self::Id(_) => code::INVALID_INPUT,
+            Self::Msg(_) => code::ERROR,
+        }
+    }
+}
 
 fn parse_err(what: impl Into<String>, err: impl ToString) -> StoreError {
     StoreError::Parse {
@@ -918,6 +952,12 @@ impl<'a> Txn<'a> {
         }
         self.store
             .append_and_view(id, op::BLOCK_ADD, serde_json::json!([blocker]))
+    }
+
+    /// Would adding this blocker create a cycle? Exposed so a batch can reject
+    /// the whole request before writing anything.
+    pub fn would_cycle(&self, id: &str, blocker: &str) -> Result<bool> {
+        would_block_cycle(&self.store, id, blocker)
     }
 
     pub fn remove_blocker(&self, id: &str, blocker: &str) -> Result<(TaskView, bool)> {

@@ -119,14 +119,32 @@ fn add_task(dir: &Path, title: &str) -> (String, String) {
     (alias.to_owned(), id.trim_end_matches(')').to_owned())
 }
 
+/// Parse a `--json` run as the envelope every command answers with.
+fn envelope(dir: &Path, args: &[&str]) -> serde_json::Value {
+    let mut full = args.to_vec();
+    if !full.contains(&"--json") {
+        full.push("--json");
+    }
+    serde_json::from_str(&ok_in(dir, &full)).expect("json envelope")
+}
+
+/// Parse a `--json` run, unwrapping the envelope's payload.
+fn payload(dir: &Path, args: &[&str]) -> serde_json::Value {
+    let mut full = args.to_vec();
+    if !full.contains(&"--json") {
+        full.push("--json");
+    }
+    envelope(dir, &full)["data"].clone()
+}
+
 fn show_json(dir: &Path, id: &str) -> serde_json::Value {
-    serde_json::from_str(&ok_in(dir, &["show", id, "--json"])).expect("show --json")
+    payload(dir, &["show", id])
 }
 
 fn list_json(dir: &Path, args: &[&str]) -> Vec<serde_json::Value> {
-    let mut full = vec!["list", "--json", "-a"];
+    let mut full = vec!["list", "-a"];
     full.extend_from_slice(args);
-    serde_json::from_str(&ok_in(dir, &full)).expect("list --json")
+    payload(dir, &full).as_array().cloned().unwrap_or_default()
 }
 
 fn record_path(dir: &Path, id: &str) -> PathBuf {
@@ -566,9 +584,15 @@ fn check_exits_nonzero_on_findings() {
     assert!(!json.status.success(), "check --json must fail on findings");
     let report: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("check --json payload");
+    // A failing command still answers in the envelope, naming the failure.
     assert_eq!(report["ok"], serde_json::json!(false));
+    assert_eq!(report["error_code"], "check_failed");
+    assert_eq!(report["command"], "check");
+    assert_eq!(report["data"]["ok"], serde_json::json!(false));
     assert!(
-        report["issues"].as_array().is_some_and(|i| !i.is_empty()),
+        report["data"]["issues"]
+            .as_array()
+            .is_some_and(|i| !i.is_empty()),
         "{report}"
     );
 }
@@ -594,11 +618,7 @@ fn recover_drops_only_the_torn_line() {
     let shown = show_json(dir.path(), &id);
     assert_eq!(shown["title"], "interrupted");
 
-    let report: serde_json::Value = serde_json::from_str(&ok_in(
-        dir.path(),
-        &["recover", &alias, "--dry-run", "--json"],
-    ))
-    .expect("recover --json");
+    let report = payload(dir.path(), &["recover", &alias, "--dry-run"]);
     assert_eq!(report["repaired"].as_array().map(Vec::len), Some(1));
     assert!(report["bytes_dropped"].as_u64().unwrap_or(0) > 0);
     assert_eq!(report["dry_run"], serde_json::json!(true));
@@ -637,11 +657,7 @@ fn purge_refuses_while_referenced_and_scrubs_on_request() {
     assert!(err.contains("--scrub"), "{err}");
     assert!(record_path(dir.path(), &blocker).exists());
 
-    let report: serde_json::Value = serde_json::from_str(&ok_in(
-        dir.path(),
-        &["purge", &blocker_alias, "-f", "--scrub", "--json"],
-    ))
-    .expect("purge --json");
+    let report = payload(dir.path(), &["purge", &blocker_alias, "-f", "--scrub"]);
     assert_eq!(report["references_scrubbed"], serde_json::json!(1));
     assert!(!record_path(dir.path(), &blocker).exists());
     assert_eq!(
@@ -1014,8 +1030,10 @@ fn path_reports_the_selected_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     ok_in(dir.path(), &["init", "-P", "demo"]);
 
-    let discovered = ok_in(dir.path(), &["path", "--json"]);
-    let value: serde_json::Value = serde_json::from_str(&discovered).expect("path --json");
+    let discovered = envelope(dir.path(), &["path", "--json"]);
+    let value = &discovered["data"];
+    assert_eq!(discovered["ok"], serde_json::json!(true));
+    assert_eq!(discovered["command"], "path");
     assert_eq!(value["source"], "discovered");
     assert_eq!(value["exists"], serde_json::json!(true));
     assert_eq!(
@@ -1031,7 +1049,7 @@ fn path_reports_the_selected_store() {
         .output()
         .expect("spawn tk");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("path --json");
-    assert_eq!(value["source"], "flag");
+    assert_eq!(value["data"]["source"], "flag");
 }
 
 // --- Task detail: checkpoint, links, acceptance, evidence --------------------
@@ -1148,6 +1166,300 @@ fn labels_replace_and_delta_agree() {
     // Filtering still finds it.
     let found = list_json(dir.path(), &["-l", "only"]);
     assert_eq!(found.len(), 1);
+}
+
+// --- One envelope for every command -----------------------------------------
+
+/// Every `--json` run answers with the same keys, whatever the command.
+fn assert_envelope_shape(value: &serde_json::Value, command: &str) {
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {value}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["command", "data", "error_code", "issues", "ok", "rev"],
+        "{value}"
+    );
+    assert_eq!(value["command"], command, "{value}");
+}
+
+#[test]
+fn every_command_answers_in_the_same_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (alias, _id) = add_task(dir.path(), "enveloped");
+
+    for (command, args) in [
+        ("add", vec!["add", "another"]),
+        ("list", vec!["list"]),
+        ("ready", vec!["ready"]),
+        ("show", vec!["show", &alias]),
+        ("log", vec!["log", &alias, "note"]),
+        ("checkpoint", vec!["checkpoint", &alias, "mid"]),
+        ("link", vec!["link", &alias, "docs/x.md"]),
+        ("accept", vec!["accept", &alias, "works"]),
+        ("evidence", vec!["evidence", &alias, "cargo test"]),
+        ("check", vec!["check"]),
+        ("path", vec!["path"]),
+        ("config", vec!["config", "show"]),
+    ] {
+        let args = args.iter().map(|a| a.as_ref()).collect::<Vec<&str>>();
+        let value = envelope(dir.path(), &args);
+        assert_envelope_shape(&value, command);
+        assert_eq!(value["ok"], serde_json::json!(true), "tk {args:?}: {value}");
+    }
+
+    // A relation to itself is rejected — and the failure is still an envelope.
+    let out = run_in(dir.path(), &["relate", &alias, &alias, "--json"]);
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+    assert_envelope_shape(&value, "relate");
+    assert_eq!(value["ok"], serde_json::json!(false));
+}
+
+#[test]
+fn json_failures_name_their_kind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (alias, id) = add_task(dir.path(), "watched");
+
+    // Not found.
+    let out = run_in(dir.path(), &["show", "nope", "--json"]);
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+    assert_eq!(value["ok"], serde_json::json!(false));
+    assert_eq!(value["error_code"], "not_found", "{value}");
+    assert!(
+        value["issues"][0]
+            .as_str()
+            .is_some_and(|m| m.contains("task not found")),
+        "the envelope carries the message too: {value}"
+    );
+
+    // A stale revision is its own kind, so a caller can retry rather than
+    // conclude the task does not exist.
+    let rev = show_json(dir.path(), &id)["rev"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok_in(dir.path(), &["log", &alias, "moved on"]);
+    let out = run_in(
+        dir.path(),
+        &["checkpoint", &alias, "late", "--if-rev", &rev, "--json"],
+    );
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+    assert_eq!(value["error_code"], "stale_revision", "{value}");
+}
+
+#[test]
+fn a_legacy_store_failure_says_which_kind_it_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(store_dir(dir.path())).expect("mkdir");
+    std::fs::write(
+        store_dir(dir.path()).join("config.json"),
+        r#"{"version":1,"project":"demo"}"#,
+    )
+    .expect("config");
+
+    let out = run_in(dir.path(), &["list", "--json"]);
+    assert!(!out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+    assert_eq!(value["error_code"], "not_a_v1_store", "{value}");
+    assert!(
+        value["issues"][0]
+            .as_str()
+            .is_some_and(|m| m.contains("migrate-v0.py")),
+        "{value}"
+    );
+}
+
+// --- Batch application ------------------------------------------------------
+
+/// Run `tk apply` with a request body on stdin.
+fn apply_in(dir: &Path, body: &str, extra: &[&str]) -> std::process::Output {
+    let mut child = bin()
+        .arg("-C")
+        .arg(dir)
+        .arg("apply")
+        .args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn apply");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(body.as_bytes())
+        .expect("write batch");
+    child.wait_with_output().expect("wait")
+}
+
+fn apply_ok(dir: &Path, body: &str) -> serde_json::Value {
+    let out = apply_in(dir, body, &["--json"]);
+    assert!(
+        out.status.success(),
+        "apply failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("apply envelope")
+}
+
+#[test]
+fn apply_runs_a_whole_change_in_one_call() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (a_alias, a_id) = add_task(dir.path(), "alpha");
+    let (b_alias, b_id) = add_task(dir.path(), "beta");
+
+    let body = serde_json::json!({"intents": [
+        {"op": "add", "title": "gamma", "labels": ["batched"]},
+        {"op": "block", "id": a_alias, "blocker": b_alias},
+        {"op": "checkpoint", "id": a_alias, "text": "in flight"},
+        {"op": "log", "id": a_alias, "msg": "batched note"},
+        {"op": "status", "id": a_alias, "status": "active"},
+    ]})
+    .to_string();
+
+    let value = apply_ok(dir.path(), &body);
+    assert_eq!(value["command"], "apply");
+    assert_eq!(value["data"]["dry_run"], serde_json::json!(false));
+    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 5);
+
+    // Every intent landed, and five invocations became one.
+    let a = show_json(dir.path(), &a_id);
+    assert_eq!(a["status"], "active");
+    assert_eq!(a["checkpoint"], "in flight");
+    assert_eq!(a["blocked_by"], serde_json::json!([b_id]));
+    assert_eq!(a["logs"][0]["msg"], "batched note");
+    assert_eq!(list_json(dir.path(), &[]).len(), 3);
+    ok_in(dir.path(), &["check"]);
+}
+
+#[test]
+fn apply_validates_the_whole_batch_before_writing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    add_task(dir.path(), "existing");
+
+    // The second intent cannot resolve, so the first must not be written.
+    let body = serde_json::json!({"intents": [
+        {"op": "add", "title": "should not exist"},
+        {"op": "log", "id": "zzzz", "msg": "nowhere"},
+    ]})
+    .to_string();
+    let out = apply_in(dir.path(), &body, &[]);
+    assert!(!out.status.success(), "a bad batch must be rejected");
+
+    let tasks = list_json(dir.path(), &[]);
+    assert_eq!(tasks.len(), 1, "nothing may be written: {tasks:?}");
+}
+
+#[test]
+fn apply_rejects_a_cycle_whole() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (a_alias, a_id) = add_task(dir.path(), "alpha");
+    let (b_alias, b_id) = add_task(dir.path(), "beta");
+
+    let body = serde_json::json!({"intents": [
+        {"op": "block", "id": a_alias, "blocker": b_alias},
+        {"op": "block", "id": b_alias, "blocker": a_alias},
+    ]})
+    .to_string();
+    let out = apply_in(dir.path(), &body, &[]);
+    assert!(!out.status.success(), "a cyclic batch must be rejected");
+
+    // Neither edge was written: a rejected batch leaves no half-graph.
+    assert_eq!(
+        show_json(dir.path(), &a_id)["blocked_by"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        show_json(dir.path(), &b_id)["blocked_by"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn apply_dry_run_reports_without_writing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (alias, id) = add_task(dir.path(), "untouched");
+
+    let body = serde_json::json!({"intents": [
+        {"op": "add", "title": "planned"},
+        {"op": "log", "id": alias, "msg": "planned note"},
+    ]})
+    .to_string();
+    let out = apply_in(dir.path(), &body, &["--json", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+    assert_eq!(value["data"]["dry_run"], serde_json::json!(true), "{value}");
+    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 2);
+
+    assert_eq!(
+        list_json(dir.path(), &[]).len(),
+        1,
+        "a dry run wrote a task"
+    );
+    assert_eq!(show_json(dir.path(), &id)["logs"], serde_json::json!([]));
+}
+
+#[test]
+fn apply_rejects_a_misspelled_intent_field() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (alias, id) = add_task(dir.path(), "typo target");
+
+    // `message` is not `msg`: silently doing nothing would hide the mistake.
+    let body = serde_json::json!({"intents": [
+        {"op": "log", "id": alias, "message": "typo"},
+    ]})
+    .to_string();
+    let out = apply_in(dir.path(), &body, &[]);
+    assert!(!out.status.success(), "a misspelled field must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("message"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(show_json(dir.path(), &id)["logs"], serde_json::json!([]));
+}
+
+#[test]
+fn apply_honours_a_stale_revision() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+    let (alias, id) = add_task(dir.path(), "contended");
+    let rev = show_json(dir.path(), &id)["rev"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Someone else moves the record first.
+    ok_in(dir.path(), &["log", &alias, "another writer"]);
+
+    let body = serde_json::json!({"intents": [
+        {"op": "checkpoint", "id": alias, "text": "late", "if_rev": rev},
+    ]})
+    .to_string();
+    let out = apply_in(dir.path(), &body, &[]);
+    assert!(!out.status.success(), "a stale intent must be rejected");
+    assert_eq!(
+        show_json(dir.path(), &id)["checkpoint"],
+        serde_json::Value::Null
+    );
 }
 
 // --- Lock guard for external sync -------------------------------------------
