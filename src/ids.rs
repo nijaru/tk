@@ -144,6 +144,49 @@ pub fn resolve_id(tasks_dir: &Path, input: &str) -> Result<String, IdError> {
     }
 
     match matches.len() {
+        0 => resolve_previous_id(tasks_dir, &lower, input),
+        1 => Ok(matches.pop().unwrap()),
+        _ => {
+            matches.sort();
+            Err(IdError::Ambiguous {
+                input: input.to_owned(),
+                matches: matches.join(", "),
+            })
+        }
+    }
+}
+
+/// A moved or renamed task keeps its old IDs in `previous_ids`, so a reference
+/// written before the move still resolves.
+fn resolve_previous_id(tasks_dir: &Path, lower: &str, input: &str) -> Result<String, IdError> {
+    let entries = std::fs::read_dir(tasks_dir).map_err(|_| IdError::NotFound(input.to_owned()))?;
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if id == "config" {
+            continue;
+        }
+        let Ok(data) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
+            continue;
+        };
+        let is_alias = value
+            .get("previous_ids")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|p| p.as_str().is_some_and(|p| p.eq_ignore_ascii_case(lower)))
+            });
+        if is_alias {
+            matches.push(id.to_owned());
+        }
+    }
+    match matches.len() {
         0 => Err(IdError::NotFound(input.to_owned())),
         1 => Ok(matches.pop().unwrap()),
         _ => {

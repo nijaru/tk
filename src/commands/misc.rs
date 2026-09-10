@@ -165,6 +165,9 @@ pub struct Clean {
     /// Force clean even if disabled in config
     #[usage(long)]
     pub force: bool,
+    /// Delete the records instead of archiving them (scrubs references)
+    #[usage(long)]
+    pub purge: bool,
 }
 
 impl RunWith<AppCtx> for Clean {
@@ -191,8 +194,28 @@ impl RunWith<AppCtx> for Clean {
             return Ok(());
         };
         let txn = ctx.store.txn().into_diagnostic()?;
-        let n = txn.clean(days).into_diagnostic()?;
-        println!("Cleaned {n} tasks completed more than {days} days ago.");
+        let out = txn.clean(days, self.purge).into_diagnostic()?;
+        if ctx.json {
+            println!(
+                "{}",
+                format::format_json(&serde_json::json!({
+                    "archived": out.archived,
+                    "purged": out.purged,
+                    "references_scrubbed": out.references_scrubbed,
+                    "days": days,
+                }))
+            );
+        } else if self.purge {
+            println!(
+                "Purged {} tasks completed more than {days} days ago (scrubbed {} references).",
+                out.purged, out.references_scrubbed
+            );
+        } else {
+            println!(
+                "Archived {} tasks completed more than {days} days ago. Use --purge to delete them.",
+                out.archived
+            );
+        }
         Ok(())
     }
 }

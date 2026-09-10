@@ -18,6 +18,9 @@ pub struct List {
     /// Show all, including done and closed
     #[usage(short = 'a', long = "all")]
     pub all: bool,
+    /// Show archived tasks only
+    #[usage(long)]
+    pub archived: bool,
     /// Filter by status (open/active/deferred/done/closed)
     #[usage(short = 's', long)]
     pub status: Option<String>,
@@ -73,7 +76,7 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<crate::model::Tas
         .transpose()
         .into_diagnostic()?;
     let parent = cmd.parent.map(|p| resolve(ctx, &p)).transpose()?.map(Some);
-    let hide_terminal = !cmd.all && !status.is_some_and(|s| s.is_terminal());
+    let hide_terminal = !cmd.all && !cmd.archived && !status.is_some_and(|s| s.is_terminal());
 
     store::list_tasks(
         &ctx.store,
@@ -88,6 +91,8 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<crate::model::Tas
             parent,
             roots: cmd.roots,
             overdue: cmd.overdue,
+            include_archived: cmd.all || cmd.archived,
+            archived_only: cmd.archived,
             limit: if cmd.all {
                 0
             } else {

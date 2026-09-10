@@ -56,6 +56,21 @@ pub enum Commands {
     Close(crate::commands::Close),
     /// Edit a task
     Edit(crate::commands::Edit),
+    /// Replace the current checkpoint (one summary, not the log)
+    #[usage(alias = "ck")]
+    Checkpoint(crate::commands::Checkpoint),
+    /// Add links to research, decisions, or source locations
+    Link(crate::commands::Link),
+    /// Remove links from a task
+    Unlink(crate::commands::Unlink),
+    /// Add or show acceptance criteria
+    Accept(crate::commands::Accept),
+    /// Add or show completion evidence
+    Evidence(crate::commands::Evidence),
+    /// Archive a done/closed task without deleting it
+    Archive(crate::commands::Archive),
+    /// Return an archived task to active views
+    Unarchive(crate::commands::Unarchive),
     /// Add a log entry to a task
     Log(crate::commands::Log),
     /// Add a blocker dependency
@@ -69,7 +84,7 @@ pub enum Commands {
     Repair(crate::commands::Repair),
     /// Move a task to a different project
     Mv(crate::commands::Mv),
-    /// Remove old completed tasks
+    /// Remove old completed tasks (archives by default)
     Clean(crate::commands::Clean),
     /// Check task integrity (non-zero exit on findings)
     Check(crate::commands::Check),

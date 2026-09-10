@@ -262,11 +262,36 @@ pub struct Task {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    /// Replaceable summary of where the work stands: result, blocker, next
+    /// action, and verification references. Not a second status store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    /// References to research, decisions, or source locations relevant here.
+    #[serde(default, deserialize_with = "null_vec")]
+    pub links: Vec<String>,
+    /// What must be true for this task to count as done.
+    #[serde(default, deserialize_with = "null_vec")]
+    pub acceptance: Vec<String>,
+    /// How completion was verified (commands, paths, commit SHAs).
+    #[serde(default, deserialize_with = "null_vec")]
+    pub evidence: Vec<String>,
+    /// Task IDs this record used to have; kept so older references still
+    /// resolve after a move or project rename.
+    #[serde(default, deserialize_with = "null_vec")]
+    pub previous_ids: Vec<String>,
+    /// Set when a terminal task is retired from active views, without
+    /// deleting the record or the references pointing at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
 }
 
 impl Task {
     pub fn id(&self) -> String {
         format!("{}-{}", self.project, self.r#ref)
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
     }
 }
 
@@ -491,6 +516,29 @@ mod tests {
         assert!(t.assignees.is_empty());
         assert!(t.blocked_by.is_empty());
         assert!(t.logs.is_empty());
+    }
+
+    #[test]
+    fn detail_fields_default_and_round_trip() {
+        // Files written before these fields existed must still load, and a
+        // rewrite must emit a stable array shape for the list fields.
+        let t: Task = serde_json::from_str(
+            r#"{"project":"tk","ref":"a7b3","title":"t","status":"open",
+                "priority":3,"created_at":"x","updated_at":"y"}"#,
+        )
+        .unwrap();
+        assert!(t.links.is_empty());
+        assert!(t.acceptance.is_empty());
+        assert!(t.evidence.is_empty());
+        assert!(t.previous_ids.is_empty());
+        assert!(t.checkpoint.is_none());
+        assert!(!t.is_archived());
+
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""links":[]"#), "{json}");
+        assert!(json.contains(r#""previous_ids":[]"#), "{json}");
+        assert!(!json.contains("checkpoint"), "{json}");
+        assert!(!json.contains("archived_at"), "{json}");
     }
 
     #[test]

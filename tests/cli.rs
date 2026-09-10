@@ -628,6 +628,207 @@ fn path_reports_the_selected_store() {
     assert_eq!(value["source"], "flag");
 }
 
+// --- Task detail: checkpoint, links, acceptance, evidence --------------------
+
+#[test]
+fn checkpoint_is_replaced_not_appended() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let id = add_task(dir.path(), "checkpointed");
+
+    ok_in(dir.path(), &["checkpoint", &id, "first pass done"]);
+    ok_in(dir.path(), &["log", &id, "historical note"]);
+    ok_in(
+        dir.path(),
+        &["checkpoint", &id, "second pass: blocked on review"],
+    );
+
+    let shown = show_json(dir.path(), &id);
+    assert_eq!(shown["checkpoint"], "second pass: blocked on review");
+    assert_eq!(shown["logs"].as_array().expect("logs").len(), 1);
+
+    let out = ok_in(dir.path(), &["checkpoint", &id]);
+    assert!(out.contains("second pass: blocked on review"), "{out}");
+
+    ok_in(dir.path(), &["checkpoint", &id, "--clear"]);
+    assert_eq!(
+        show_json(dir.path(), &id)["checkpoint"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn checkpoint_rejects_a_stale_revision() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let id = add_task(dir.path(), "stale checkpoint");
+    let rev = show_json(dir.path(), &id)["rev"]
+        .as_str()
+        .expect("rev")
+        .to_owned();
+
+    ok_in(dir.path(), &["checkpoint", &id, "fresh", "--if-rev", &rev]);
+    let stale = run_in(
+        dir.path(),
+        &["checkpoint", &id, "overwrite", "--if-rev", &rev],
+    );
+    assert!(!stale.status.success(), "stale checkpoint must be rejected");
+    assert_eq!(show_json(dir.path(), &id)["checkpoint"], "fresh");
+}
+
+#[test]
+fn links_acceptance_and_evidence_round_trip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let id = add_task(dir.path(), "documented");
+    let reference = "agent-context/projects/x/research/y.md";
+
+    ok_in(dir.path(), &["link", &id, reference]);
+    ok_in(dir.path(), &["accept", &id, "parity test passes"]);
+    ok_in(dir.path(), &["accept", &id, "docs updated"]);
+    ok_in(dir.path(), &["evidence", &id, "cargo test --all-targets"]);
+
+    let shown = show_json(dir.path(), &id);
+    assert_eq!(shown["links"], serde_json::json!([reference]));
+    assert_eq!(
+        shown["acceptance"],
+        serde_json::json!(["parity test passes", "docs updated"])
+    );
+    assert_eq!(
+        shown["evidence"],
+        serde_json::json!(["cargo test --all-targets"])
+    );
+
+    // Adding the same value twice does not duplicate it.
+    ok_in(dir.path(), &["link", &id, reference]);
+    assert_eq!(
+        show_json(dir.path(), &id)["links"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let detail = ok_in(dir.path(), &["show", &id]);
+    assert!(detail.contains(reference), "{detail}");
+    assert!(detail.contains("parity test passes"), "{detail}");
+
+    ok_in(dir.path(), &["accept", &id, "--remove", "docs updated"]);
+    assert_eq!(
+        show_json(dir.path(), &id)["acceptance"],
+        serde_json::json!(["parity test passes"])
+    );
+    ok_in(dir.path(), &["unlink", &id, reference]);
+    assert_eq!(show_json(dir.path(), &id)["links"], serde_json::json!([]));
+    ok_in(dir.path(), &["evidence", &id, "--clear"]);
+    assert_eq!(
+        show_json(dir.path(), &id)["evidence"],
+        serde_json::json!([])
+    );
+}
+
+// --- Archival and stable references -----------------------------------------
+
+fn done_task(dir: &Path, title: &str) -> String {
+    let id = add_task(dir, title);
+    ok_in(dir, &["done", &id]);
+    id
+}
+
+#[test]
+fn archive_requires_a_terminal_status_and_hides_from_active_views() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let open = add_task(dir.path(), "still open");
+    let out = run_in(dir.path(), &["archive", &open]);
+    assert!(!out.status.success(), "an open task must not archive");
+
+    let done = done_task(dir.path(), "finished");
+    ok_in(dir.path(), &["archive", &done]);
+    assert!(show_json(dir.path(), &done)["archived_at"].is_string());
+
+    // Other tasks may still reference an archived task, and resolution works.
+    let dependent = add_task(dir.path(), "depends on archived");
+    ok_in(dir.path(), &["block", &dependent, &done]);
+    let ready = ok_in(dir.path(), &["ready"]);
+    assert!(ready.contains(&dependent), "{ready}");
+    ok_in(dir.path(), &["check"]);
+
+    let listed = ok_in(dir.path(), &["list", "-s", "done"]);
+    assert!(
+        !listed.contains(&done),
+        "archived task in the default list: {listed}"
+    );
+    let archived = ok_in(dir.path(), &["list", "--archived"]);
+    assert!(archived.contains(&done), "{archived}");
+    assert!(archived.contains("[archived]"), "{archived}");
+
+    ok_in(dir.path(), &["unarchive", &done]);
+    let listed = ok_in(dir.path(), &["list", "-s", "done"]);
+    assert!(listed.contains(&done), "{listed}");
+}
+
+#[test]
+fn clean_archives_instead_of_deleting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let id = done_task(dir.path(), "old work");
+
+    let out = ok_in(dir.path(), &["clean", "--older-than", "0"]);
+    assert!(out.contains("Archived 1"), "{out}");
+    assert!(show_json(dir.path(), &id)["archived_at"].is_string());
+    assert!(
+        store_dir(dir.path()).join(format!("{id}.json")).exists(),
+        "clean deleted the record instead of archiving it"
+    );
+
+    // Purge still deletes, including already-archived records.
+    let out = ok_in(dir.path(), &["clean", "--older-than", "0", "--purge"]);
+    assert!(out.contains("Purged 1"), "{out}");
+    assert!(!store_dir(dir.path()).join(format!("{id}.json")).exists());
+}
+
+#[test]
+fn moved_task_still_resolves_by_its_previous_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let old_id = add_task(dir.path(), "relocated");
+
+    let out = ok_in(dir.path(), &["mv", &old_id, "other"]);
+    assert!(out.contains("Moved"), "{out}");
+    let moved = show_json(dir.path(), &old_id);
+    assert_eq!(moved["project"], "other");
+    assert_eq!(moved["previous_ids"], serde_json::json!([old_id]));
+
+    // A reference written before the move still points at the task.
+    ok_in(dir.path(), &["check"]);
+}
+
+#[test]
+fn previous_id_shadowing_a_live_task_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let live = add_task(dir.path(), "live");
+    let other = add_task(dir.path(), "other");
+
+    let path = store_dir(dir.path()).join(format!("{other}.json"));
+    let raw = std::fs::read_to_string(&path).expect("task file");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+    value["previous_ids"] = serde_json::json!([live]);
+    std::fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+    let out = run_in(dir.path(), &["check"]);
+    assert!(
+        !out.status.success(),
+        "shadowed previous_ids must be reported"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("previous_ids"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 // --- Lock guard for external sync -------------------------------------------
 
 #[test]

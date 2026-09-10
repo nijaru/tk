@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::ids::{self, IdError, TaskId};
-use crate::model::{Config, Priority, Status, Task, TaskView};
+use crate::model::{Config, LogEntry, Priority, Status, Task, TaskView};
 use crate::timeutil;
 
 #[derive(Debug, Error)]
@@ -537,6 +537,12 @@ impl<'a> Txn<'a> {
                 estimate: opts.estimate,
                 due_date: opts.due_date.clone(),
                 logs: Vec::new(),
+                checkpoint: None,
+                links: Vec::new(),
+                acceptance: Vec::new(),
+                evidence: Vec::new(),
+                previous_ids: Vec::new(),
+                archived_at: None,
                 created_at: now.clone(),
                 updated_at: now,
                 completed_at: None,
@@ -627,7 +633,6 @@ impl<'a> Txn<'a> {
     }
 
     pub fn add_log(&self, id: &str, msg: &str) -> Result<TaskView> {
-        use crate::model::LogEntry;
         let mut task = self.load(id)?;
         let now = timeutil::now_rfc3339_nano();
         task.logs.push(LogEntry {
@@ -657,6 +662,97 @@ impl<'a> Txn<'a> {
             self.save(&task)?;
         }
         Ok((self.view(&task), found))
+    }
+
+    /// Replace or clear the current checkpoint (never the historical log).
+    pub fn set_checkpoint(
+        &self,
+        id: &str,
+        text: Option<String>,
+        expect_rev: Option<&str>,
+    ) -> Result<TaskView> {
+        let mut task = self.load(id)?;
+        self.check_rev(&task, expect_rev)?;
+        let text = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+        if task.checkpoint != text {
+            task.checkpoint = text;
+            task.updated_at = timeutil::now_rfc3339_nano();
+            self.save(&task)?;
+        }
+        Ok(self.view(&task))
+    }
+
+    /// Append to, remove from, or clear one list-valued detail field.
+    pub fn edit_list(
+        &self,
+        id: &str,
+        field: ListField,
+        op: ListOp,
+        expect_rev: Option<&str>,
+    ) -> Result<TaskView> {
+        let mut task = self.load(id)?;
+        self.check_rev(&task, expect_rev)?;
+        let changed = match op {
+            ListOp::Add(values) => {
+                let list = field_mut(&mut task, field);
+                let mut changed = false;
+                for value in values {
+                    let value = value.trim().to_owned();
+                    if value.is_empty() || list.contains(&value) {
+                        continue;
+                    }
+                    list.push(value);
+                    changed = true;
+                }
+                changed
+            }
+            ListOp::Remove(values) => {
+                let list = field_mut(&mut task, field);
+                let before = list.len();
+                list.retain(|item| !values.iter().any(|v| v.trim() == item));
+                list.len() != before
+            }
+            ListOp::Clear => {
+                let list = field_mut(&mut task, field);
+                let changed = !list.is_empty();
+                list.clear();
+                changed
+            }
+        };
+        if changed {
+            task.updated_at = timeutil::now_rfc3339_nano();
+            self.save(&task)?;
+        }
+        Ok(self.view(&task))
+    }
+
+    /// Retire a terminal task from active views without deleting it.
+    pub fn archive(&self, id: &str, expect_rev: Option<&str>) -> Result<TaskView> {
+        let mut task = self.load(id)?;
+        self.check_rev(&task, expect_rev)?;
+        if !task.status.is_terminal() {
+            return Err(StoreError::Msg(format!(
+                "only done or closed tasks can be archived ({id} is {})",
+                task.status
+            )));
+        }
+        if !task.is_archived() {
+            let now = timeutil::now_rfc3339_nano();
+            task.archived_at = Some(now.clone());
+            task.updated_at = now;
+            self.save(&task)?;
+        }
+        Ok(self.view(&task))
+    }
+
+    pub fn unarchive(&self, id: &str) -> Result<TaskView> {
+        let mut task = self.load(id)?;
+        if task.archived_at.is_some() {
+            task.archived_at = None;
+            task.updated_at = timeutil::now_rfc3339_nano();
+            self.save(&task)?;
+        }
+        Ok(self.view(&task))
     }
 
     // -- delete & repair ---------------------------------------------------
@@ -800,8 +896,12 @@ impl<'a> Txn<'a> {
             }
             if t.project == old {
                 let old_path = self.ctx.task_path(&t.id());
+                let old_id = t.id();
                 t.project = new.to_owned();
                 let new_path = self.ctx.task_path(&t.id());
+                if !t.previous_ids.iter().any(|p| p == &old_id) {
+                    t.previous_ids.push(old_id.clone());
+                }
                 res.renamed.push(t.id());
                 // Move first so a later write failure can't leave both IDs behind.
                 fs::rename(&old_path, &new_path).map_err(StoreError::Io)?;
@@ -838,6 +938,9 @@ impl<'a> Txn<'a> {
             )));
         }
         task.project = new_project.to_owned();
+        if !task.previous_ids.iter().any(|p| p == id) {
+            task.previous_ids.push(id.to_owned());
+        }
         task.updated_at = timeutil::now_rfc3339_nano();
         fs::rename(self.ctx.task_path(id), self.ctx.task_path(&new_id)).map_err(StoreError::Io)?;
         write_task(self.ctx, &task)
@@ -871,7 +974,9 @@ impl<'a> Txn<'a> {
 
     // -- clean -------------------------------------------------------------
 
-    pub fn clean(&self, days: i64) -> Result<usize> {
+    /// Retire old terminal tasks. `purge` keeps the destructive behavior;
+    /// the default archives, so existing references stay resolvable.
+    pub fn clean(&self, days: i64, purge: bool) -> Result<CleanOutcome> {
         if days < 0 {
             return Err(StoreError::Msg(
                 "clean threshold must be non-negative".into(),
@@ -894,29 +999,49 @@ impl<'a> Txn<'a> {
                 doomed.insert(t.id());
             }
         }
-        for id in &doomed {
-            let p = self.ctx.task_path(id);
-            if p.exists() {
-                fs::remove_file(p).map_err(StoreError::Io)?;
+
+        let mut out = CleanOutcome::default();
+        if purge {
+            for id in &doomed {
+                let p = self.ctx.task_path(id);
+                if p.exists() {
+                    fs::remove_file(p).map_err(StoreError::Io)?;
+                }
             }
-        }
-        for mut t in tasks {
-            if doomed.contains(&t.id()) {
-                continue;
+            for mut t in tasks {
+                if doomed.contains(&t.id()) {
+                    continue;
+                }
+                let mut modified = false;
+                let before = t.blocked_by.len();
+                t.blocked_by.retain(|b| !doomed.contains(b));
+                if t.blocked_by.len() != before {
+                    out.references_scrubbed += before - t.blocked_by.len();
+                    modified = true;
+                }
+                if t.parent.as_deref().is_some_and(|p| doomed.contains(p)) {
+                    t.parent = None;
+                    out.references_scrubbed += 1;
+                    modified = true;
+                }
+                if modified {
+                    write_task(self.ctx, &t)?;
+                }
             }
-            let mut modified = false;
-            let before = t.blocked_by.len();
-            t.blocked_by.retain(|b| !doomed.contains(b));
-            modified |= t.blocked_by.len() != before;
-            if t.parent.as_deref().is_some_and(|p| doomed.contains(p)) {
-                t.parent = None;
-                modified = true;
-            }
-            if modified {
+            out.purged = doomed.len();
+        } else {
+            for mut t in tasks {
+                if !doomed.contains(&t.id()) || t.is_archived() {
+                    continue;
+                }
+                let now = timeutil::now_rfc3339_nano();
+                t.archived_at = Some(now.clone());
+                t.updated_at = now;
                 write_task(self.ctx, &t)?;
+                out.archived += 1;
             }
         }
-        Ok(doomed.len())
+        Ok(out)
     }
 }
 
@@ -1153,6 +1278,45 @@ pub struct UpdateOptions {
     pub expect_rev: Option<String>,
 }
 
+/// One list-valued detail field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ListField {
+    Links,
+    Acceptance,
+    Evidence,
+}
+
+impl ListField {
+    pub fn values(self, task: &Task) -> &[String] {
+        match self {
+            Self::Links => &task.links,
+            Self::Acceptance => &task.acceptance,
+            Self::Evidence => &task.evidence,
+        }
+    }
+}
+
+fn field_mut(task: &mut Task, field: ListField) -> &mut Vec<String> {
+    match field {
+        ListField::Links => &mut task.links,
+        ListField::Acceptance => &mut task.acceptance,
+        ListField::Evidence => &mut task.evidence,
+    }
+}
+
+pub enum ListOp {
+    Add(Vec<String>),
+    Remove(Vec<String>),
+    Clear,
+}
+
+#[derive(Debug, Default)]
+pub struct CleanOutcome {
+    pub archived: usize,
+    pub purged: usize,
+    pub references_scrubbed: usize,
+}
+
 #[derive(Debug)]
 pub struct RemoveOutcome {
     pub id: String,
@@ -1203,6 +1367,10 @@ pub struct ListOptions {
     pub parent: Option<Option<String>>,
     pub roots: bool,
     pub overdue: bool,
+    /// Include archived tasks (they are hidden by default).
+    pub include_archived: bool,
+    /// Show archived tasks only.
+    pub archived_only: bool,
     pub limit: usize,
 }
 
@@ -1260,6 +1428,11 @@ pub fn list_tasks(ctx: &Ctx, opts: &ListOptions) -> Result<Vec<TaskView>> {
     let mut filtered: Vec<&Task> = tasks
         .iter()
         .filter(|t| {
+            match (t.is_archived(), opts.archived_only, opts.include_archived) {
+                (true, false, false) => return false,
+                (false, true, _) => return false,
+                _ => {}
+            }
             if let Some(s) = opts.status
                 && t.status != s
             {
@@ -1466,6 +1639,20 @@ pub fn check_integrity(ctx: &Ctx) -> Result<Vec<String>> {
     }
     for id in cyclic_nodes(&parent_edges) {
         issues.push(format!("Task {id} is part of a parent cycle"));
+    }
+
+    // previous_ids must not shadow a live task, or alias resolution gets
+    // ambiguous for every caller.
+    for t in &tasks {
+        for p in &t.previous_ids {
+            if known.contains(p) {
+                issues.push(format!(
+                    "Task {} lists {} in previous_ids, but that ID is a live task",
+                    t.id(),
+                    p
+                ));
+            }
+        }
     }
 
     issues.sort();

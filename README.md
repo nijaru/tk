@@ -86,13 +86,20 @@ myapp-x9k2  | p2   | open         | Write tests
 | `tk done <id>`              | Complete task                              |
 | `tk close <id>`             | Close/cancel task                          |
 | `tk edit <id>`              | Edit task                                  |
+| `tk checkpoint <id> [TEXT]` | Replace the current checkpoint (`ck`; no text shows it) |
+| `tk link <id> <REF…>`       | Add links to research, decisions, or source |
+| `tk unlink <id> <REF…>`     | Remove links                               |
+| `tk accept <id> [TEXT…]`    | Add or show acceptance criteria            |
+| `tk evidence <id> [TEXT…]`  | Add or show completion evidence            |
 | `tk log <id> <msg>`         | Add log entry                              |
 | `tk block <id> <blocker>`   | Add dependency (id blocked by blocker)     |
 | `tk unblock <id> <blocker>` | Remove dependency                          |
+| `tk archive <id>`           | Retire a done/closed task without deleting it |
+| `tk unarchive <id>`         | Return an archived task to active views    |
 | `tk remove` / `tk rm <id>`  | Delete task (prompts for confirmation)     |
 | `tk repair <id>`            | Fix recorded inconsistencies in a task file |
 | `tk mv <id> <project>`      | Move task to a different project           |
-| `tk clean`                  | Remove old terminal tasks (default: 14d)   |
+| `tk clean`                  | Archive old terminal tasks (default: 14d; `--purge` deletes) |
 | `tk check`                  | Check task integrity (non-zero on findings) |
 | `tk path`                   | Print the resolved task store location     |
 | `tk lock -- CMD`            | Run a command while holding the store lock |
@@ -127,7 +134,37 @@ tk list --parent a7b3          # Filter by parent
 tk list --roots                # Top-level tasks only
 tk list --overdue              # Overdue tasks only
 tk list -n 10                  # Limit results
+tk list --archived             # Archived tasks only (implies terminal)
 ```
+
+## Checkpoint, Links, Acceptance, Evidence
+
+```bash
+tk checkpoint a7b3 "Parity passes; blocked on docs. Next: write the guide."
+tk checkpoint a7b3                       # print the current checkpoint
+tk checkpoint a7b3 --clear
+tk link a7b3 agent-context/projects/x/research/y.md src/store.rs:120
+tk accept a7b3 "parity test passes" "docs updated"
+tk evidence a7b3 "cargo test --all-targets"
+```
+
+The checkpoint is one replaceable summary of where the work stands — current
+result, blocker, next action, verification. It never replaces the log, which
+stays append-only history. `checkpoint` and `archive` accept `--if-rev`, so a
+replacement written from a stale read is refused instead of silently
+overwriting a newer one.
+
+## Archives and Stable References
+
+`tk clean` archives old terminal tasks by default: the record stays, references
+to it stay resolvable, and it drops out of `list`/`ready`. `tk list --archived`
+shows the archived set and marks it `[archived]`; `-a` includes it.
+`tk clean --purge` keeps the old destructive behavior and scrubs references.
+
+`tk mv` and `tk config project rename` still change IDs, but the previous ID is
+recorded in the task's `previous_ids`, so `tk show <old-id>` and blockers or
+parents written before the move keep resolving. `tk check` reports a
+`previous_ids` entry that collides with a live task ID.
 
 ## Edit Options
 
@@ -250,7 +287,9 @@ tk writes inside `.tasks/` when it creates a store.
 ## Storage
 
 Plain JSON files in `.tasks/` — one file per task, one config file, one `.lock`
-for the mutation guard.
+for the mutation guard. Task JSON carries the core fields plus optional
+`checkpoint`, `links`, `acceptance`, `evidence`, `previous_ids`, and
+`archived_at`; older readers ignore them.
 
 ## License
 

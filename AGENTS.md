@@ -9,7 +9,7 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 | `src/main.rs`      | Binary entry — calls `tk::cli::run()`                          |
 | `src/lib.rs`       | Library root (all modules `pub` for integration tests)         |
 | `src/cli.rs`       | Root `Cli` derive, global flags (`-j/--json`, `-C/--dir`)      |
-| `src/commands/`    | One module per command; `misc.rs` holds Remove/Init/Mv/Clean/Check |
+| `src/commands/`    | One module per command; `misc.rs` holds Remove/Init/Mv/Clean/Check, `detail.rs` holds checkpoint/links/acceptance/evidence/archive |
 | `src/commands/config.rs` | Nested `config` subcommands (project/alias/defaults/clean-after) |
 | `src/model.rs`     | `Task`, `Config`, `Status`, `Priority` — lenient serde for old files |
 | `src/store.rs`     | `Ctx` (store resolution), `Txn` (locked mutations), atomic writes, CRUD, list/filter, integrity |
@@ -46,6 +46,10 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 
 - Reads task files written by the old Go binary: unknown fields ignored, explicit
   `null` slices read as empty, legacy string logs and `cancelled` status parsed.
+- New task fields (`checkpoint`, `links`, `acceptance`, `evidence`,
+  `previous_ids`, `archived_at`) are additive and optional. An old writer that
+  rewrites a record drops them, so mixed-version writers need a controlled
+  upgrade rather than coexistence.
 - Deliberate breaks from Go: `mv` moves tasks only (project rename lives under
   `config project rename`); `external` provider stubs dropped; `@me` was never
   implemented (help text only) and is gone.

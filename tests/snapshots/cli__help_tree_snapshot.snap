@@ -9,29 +9,37 @@ Minimal task tracker. Plain JSON in .tasks/ — no daemons, no runtime.
 Usage: tk [FLAGS] <SUBCOMMAND>
 
 Commands:
-  add      Create a task
-  block    Add a blocker dependency
-  check    Check task integrity (non-zero exit on findings)
-  clean    Remove old completed tasks
-  close    Close/cancel a task
-  config   Show or set configuration
-  defer    Defer a task
-  done     Complete a task
-  edit     Edit a task
-  init     Initialize .tasks/ in the current directory
-  list     List tasks [aliases: ls]
-  lock     Run a command while holding the store mutation lock
-  log      Add a log entry to a task
-  mv       Move a task to a different project
-  open     Reset a task status to open
-  path     Print the resolved task store location
-  ready    List active/open unblocked tasks [aliases: rdy]
-  remove   Delete a task [aliases: rm]
-  repair   Repair recorded inconsistencies in a task file
-  show     Show task details
-  start    Start working on a task (open → active) [aliases: active]
-  unblock  Remove a blocker dependency
-  help     Print this message or the help of the given subcommand(s)
+  accept      Add or show acceptance criteria
+  add         Create a task
+  archive     Archive a done/closed task without deleting it
+  block       Add a blocker dependency
+  check       Check task integrity (non-zero exit on findings)
+  checkpoint  Replace the current checkpoint (one summary, not the log)
+              [aliases: ck]
+  clean       Remove old completed tasks (archives by default)
+  close       Close/cancel a task
+  config      Show or set configuration
+  defer       Defer a task
+  done        Complete a task
+  edit        Edit a task
+  evidence    Add or show completion evidence
+  init        Initialize .tasks/ in the current directory
+  link        Add links to research, decisions, or source locations
+  list        List tasks [aliases: ls]
+  lock        Run a command while holding the store mutation lock
+  log         Add a log entry to a task
+  mv          Move a task to a different project
+  open        Reset a task status to open
+  path        Print the resolved task store location
+  ready       List active/open unblocked tasks [aliases: rdy]
+  remove      Delete a task [aliases: rm]
+  repair      Repair recorded inconsistencies in a task file
+  show        Show task details
+  start       Start working on a task (open → active) [aliases: active]
+  unarchive   Return an archived task to active views
+  unblock     Remove a blocker dependency
+  unlink      Remove links from a task
+  help        Print this message or the help of the given subcommand(s)
 
 Flags:
   -j, --json             Output as JSON
@@ -92,6 +100,7 @@ Arguments:
 
 Flags:
   -a, --all                  Show all, including done and closed
+      --archived             Show archived tasks only
   -s, --status <STATUS>      Filter by status (open/active/deferred/done/closed)
   -p, --priority <PRIORITY>  Filter by priority
   -P, --project <PROJECT>    Filter by project
@@ -257,6 +266,139 @@ Global flags:
       --tasks-dir <DIR>           Task store directory: exact path, must already
                                   exist (no discovery)
 
+=== tk checkpoint ===
+Replace the current checkpoint (one summary, not the log)
+
+Usage: tk checkpoint [--clear] [--if-rev <REV>] <ID> [TEXT]…
+
+Arguments:
+  <ID>     Task ID or ref
+  [TEXT]…  Checkpoint text: current result, blocker, next action, verification
+
+Flags:
+      --clear            Clear the checkpoint
+      --if-rev <REV>     Reject the update unless the task still has this
+                         revision
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk link ===
+Add links to research, decisions, or source locations
+
+Usage: tk link <ID> [REFS]…
+
+Arguments:
+  <ID>     Task ID or ref
+  [REFS]…  References to add (paths, URLs, task IDs); with none, list them
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk unlink ===
+Remove links from a task
+
+Usage: tk unlink <ID> [REFS]…
+
+Arguments:
+  <ID>     Task ID or ref
+  [REFS]…  References to remove
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk accept ===
+Add or show acceptance criteria
+
+Usage: tk accept [--remove <TEXT>] [--clear] <ID> [VALUES]…
+
+Arguments:
+  <ID>       Task ID or ref
+  [VALUES]…  Values to add; with none and no flags, list them
+
+Flags:
+      --remove <TEXT>    Remove an exact value (repeatable)
+      --clear            Remove all values
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk evidence ===
+Add or show completion evidence
+
+Usage: tk evidence [--remove <TEXT>] [--clear] <ID> [VALUES]…
+
+Arguments:
+  <ID>       Task ID or ref
+  [VALUES]…  Values to add; with none and no flags, list them
+
+Flags:
+      --remove <TEXT>    Remove an exact value (repeatable)
+      --clear            Remove all values
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk archive ===
+Archive a done/closed task without deleting it
+
+Usage: tk archive [--if-rev <REV>] <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+      --if-rev <REV>     Reject the change unless the task still has this
+                         revision
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk unarchive ===
+Return an archived task to active views
+
+Usage: tk unarchive <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
 === tk log ===
 Add a log entry to a task
 
@@ -371,13 +513,15 @@ Global flags:
                          (no discovery)
 
 === tk clean ===
-Remove old completed tasks
+Remove old completed tasks (archives by default)
 
-Usage: tk clean [--older-than <OLDER_THAN>] [--force]
+Usage: tk clean [FLAGS]
 
 Flags:
       --older-than <OLDER_THAN>  Remove tasks completed more than N days ago
       --force                    Force clean even if disabled in config
+      --purge                    Delete the records instead of archiving them
+                                 (scrubs references)
   -h, --help                     Print help
 
 Global flags:

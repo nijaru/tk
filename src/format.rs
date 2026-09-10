@@ -123,6 +123,9 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
     }
 
     let mut markers = String::new();
+    if t.task.is_archived() {
+        markers += " [archived]";
+    }
     if t.is_overdue {
         markers += " [OVERDUE]";
     } else if let Some(d) = t.days_until_due
@@ -216,6 +219,9 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
     if let Some(c) = &t.task.completed_at {
         lines.push(format!("Completed:   {}", timeutil::format_date(c)));
     }
+    if let Some(a) = &t.task.archived_at {
+        lines.push(format!("Archived:    {}", timeutil::format_date(a)));
+    }
     lines.push(format!("Revision:    {}", t.rev));
     if !t.unresolved_blockers.is_empty() {
         lines.push(format!(
@@ -233,6 +239,27 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
             "Blockers:    {}{state}",
             t.task.blocked_by.join(", ")
         ));
+    }
+    if let Some(c) = &t.task.checkpoint {
+        lines.push(String::new());
+        lines.push(format!("Checkpoint:  {c}"));
+    }
+    if !t.task.links.is_empty() {
+        lines.push(format!("Links:       {}", t.task.links.join(", ")));
+    }
+    if !t.task.acceptance.is_empty() {
+        lines.push(String::new());
+        lines.push("Acceptance:".to_owned());
+        for a in &t.task.acceptance {
+            lines.push(format!("  - {a}"));
+        }
+    }
+    if !t.task.evidence.is_empty() {
+        lines.push(String::new());
+        lines.push("Evidence:".to_owned());
+        for e in &t.task.evidence {
+            lines.push(format!("  - {e}"));
+        }
     }
     if !t.task.logs.is_empty() {
         lines.push(String::new());
@@ -324,6 +351,12 @@ mod tests {
                     ts: "2026-01-10T12:00:00.000000000Z".into(),
                     msg: "note".into(),
                 }],
+                checkpoint: None,
+                links: Vec::new(),
+                acceptance: Vec::new(),
+                evidence: Vec::new(),
+                previous_ids: Vec::new(),
+                archived_at: None,
                 created_at: "2026-01-10T12:00:00.000000000Z".into(),
                 updated_at: "2026-01-10T12:00:00.000000000Z".into(),
                 completed_at: None,

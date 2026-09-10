@@ -3,6 +3,7 @@
 mod add;
 mod config;
 mod deps;
+mod detail;
 mod edit;
 mod list;
 mod log;
@@ -13,6 +14,7 @@ mod status;
 pub use add::Add;
 pub use config::Config;
 pub use deps::{Block, Unblock};
+pub use detail::{Accept, Archive, Checkpoint, Evidence, Link, Unarchive, Unlink};
 pub use edit::Edit;
 pub use list::{List, Ready};
 pub use log::Log;
