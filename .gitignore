@@ -13,3 +13,7 @@ out/
 # Editor/IDE
 .idea/
 .DS_Store
+
+# Python bytecode (tools/migrate-v0.py)
+__pycache__/
+*.pyc

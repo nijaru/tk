@@ -22,9 +22,13 @@ binary, no runtime.
 | `tests/cli.rs`     | Help-drift snapshot + end-to-end and concurrency tests         |
 | `tests/migration.rs` | Runs `tools/migrate-v0.py` against a v0 fixture             |
 | `tools/migrate-v0.py` | One-shot v0 → v1 conversion; not a subcommand, delete after cutover |
-| `ai/`              | **Symlink** into the central knowledge store (`agent-context/projects/github.com/nijaru/tk/ai`). Owned by the context system — do not write here from a repo session |
 | `.local/`          | Clone-local working notes — excluded via `.git/info/exclude`   |
 | `.tasks/`          | Local-only task state — excluded via `.git/info/exclude`       |
+
+This repository carries `AGENTS.md` only. It deliberately has no `CLAUDE.md`
+symlink and no `ai/` symlink into the knowledge store: the central knowledge
+store is read and written through `context`, not through a path inside the
+checkout.
 
 ## Technology Stack
 

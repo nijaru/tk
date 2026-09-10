@@ -129,13 +129,10 @@ tk list --archived             # archived only
 
 ## Identity, Moves, and Renames
 
-A task's ID is a ULID and never changes. Its alias is assigned once and never
-changes. `project` is a display field, so `tk mv` and
-`tk config project rename` change one field and rewrite no references — a
-blocker or parent recorded before the move still points at the same task.
-
-References in `blocked_by`, `parent`, and `related` hold task IDs. Human output
-renders them as aliases, so `tk show` reads the way you type.
+A task's ID is a ULID and its alias is assigned once; neither ever changes.
+`project` is a display field, so `tk mv` and `tk config project rename` change
+one field and rewrite no references. `blocked_by`, `parent`, and `related` hold
+task IDs and are rendered as aliases in human output.
 
 ## Checkpoints, Links, and Evidence
 
@@ -148,23 +145,20 @@ tk accept a7b3 "parity test passes" "docs updated"
 tk evidence a7b3 "cargo test --all-targets"
 ```
 
-The checkpoint is one replaceable summary of where the work stands — current
-result, blocker, next action, verification. The log stays history.
-`checkpoint` and `archive` accept `--if-rev`, so a replacement written from a
-stale read is refused instead of silently overwriting a newer one.
-
-`links` holds documents. Use `tk relate` for another task.
+The checkpoint is one replaceable summary — current result, blocker, next
+action, verification — while the log stays history. `links` holds documents; use
+`tk relate` for another task.
 
 ## Archives and Deletion
 
-`tk clean` archives old terminal tasks by default: the record stays, references
-to it stay resolvable, and it drops out of `list`/`ready`. `tk list --archived`
-shows the archived set and marks it `[archived]`; `-a` includes it.
+`tk clean` archives old terminal tasks: the record stays, references to it stay
+resolvable, and it drops out of `list`/`ready`. `tk list --archived` shows that
+set.
 
 `tk purge` deletes a record and refuses while other tasks still reference it,
-naming them. `tk purge <ref> --scrub -f` deletes anyway and removes those
-references. It never deletes without `-f` when stdin is not a terminal, so an
-unattended script cannot remove a task by forgetting a flag.
+naming them; `--scrub` deletes anyway and removes those references. It never
+deletes without `-f` when stdin is not a terminal, so an unattended script
+cannot remove a task by forgetting a flag.
 
 ## JSON Output and Batches
 
@@ -178,7 +172,9 @@ Every command answers `--json` with the same envelope, including failures:
 `error_code` is a stable kind — `not_found`, `ambiguous`, `stale_revision`,
 `not_a_v1_store`, `invalid_input`, `check_failed`, `io`, `parse` — so a caller
 can branch without reading prose. A failing `--json` run exits non-zero and
-still writes the envelope to stdout.
+still writes the envelope to stdout. The envelope's keys are always present;
+inside `data`, a task's optional fields (`due_date`, `checkpoint`, `parent`,
+`completed_at`, …) are absent when unset rather than `null`.
 
 `tk apply` runs a whole change under one lock, validated in full before
 anything is written:
@@ -193,51 +189,46 @@ echo '{"intents":[
 
 Intents are `add`, `checkpoint`, `status`, `log`, `edit`, `block`, `unblock`,
 `relate`, `unrelate`, `link`, `unlink`, `accept`, `evidence`, `archive`,
-`unarchive`, `mv`, and `purge`. Unknown or misspelled fields are rejected. The
-batch is validated whole, so a wrong batch is rejected whole, and `--dry-run`
-reports the plan without writing. It is not a cross-record transaction: an I/O
-failure partway through reports how many intents had landed.
+`unarchive`, `mv`, and `purge`; unknown fields are rejected. `--dry-run` reports
+the plan without writing. It is not a cross-record transaction — an I/O failure
+partway through reports how many intents had landed.
 
 ## Store Selection
 
 Without an override, tk walks up from the working directory to the nearest
-`.tasks/` or `.git`. `-C <dir>` runs that search from another directory.
-`--tasks-dir <dir>` (or `TK_TASKS_DIR`) names the store exactly: no walking, and
-a missing store is an error rather than a new one.
-
-Only `tk init` creates a store, including an explicitly designated one. `tk add`
-never bootstraps, so a stray command in the wrong directory reports a missing
-store instead of starting a second task queue. `tk path --json` reports the
-selected store, how it was selected, and whether it exists.
+`.tasks/` or `.git`. `--tasks-dir <dir>` (or `TK_TASKS_DIR`) names the store
+exactly: no walking, and a missing store is an error rather than a new one.
+Only `tk init` creates a store; `tk add` never bootstraps, so a stray command
+reports a missing store instead of starting a second task queue.
+`tk path --json` reports which store was selected and how.
 
 ## Concurrency and Integrity
 
-Records are append-only event logs. An append is a single `O_APPEND` write, so
-concurrent `tk log` and label-delta writers cannot lose each other's events even
-without coordination. The advisory lock on `<store>/.lock` is taken only where
-one process must see a consistent store: creating a task (alias uniqueness),
-adding a blocking edge (cycle check), `--if-rev` conditional writes,
-multi-record operations (`purge --scrub`, project rename, `clean --purge`), and
-`tk apply`.
+Records are append-only event logs, and an append is a single `O_APPEND` write,
+so concurrent `tk log` and label-delta writers cannot lose each other's events.
+The advisory lock on `<store>/.lock` is taken only where one process must see a
+consistent store: creating a task (alias uniqueness), adding a blocking edge
+(cycle check), `--if-rev` writes, multi-record operations (`purge --scrub`,
+project rename, `clean --purge`), and `tk apply`.
 
 Reads take no lock and never repair. `tk show` reports an unresolvable blocker
 or parent; a missing prerequisite counts as blocking, so it never makes a
-dependent look ready. `tk check` exits non-zero on any finding and prints
-`{"ok":false,"issues":[…]}` with `--json`. A write interrupted before its
-newline leaves a torn tail that the fold ignores and `tk recover` truncates.
+dependent look ready. `tk check` exits non-zero on any finding. A write
+interrupted before its newline leaves a torn tail that the fold ignores and
+`tk recover` truncates.
 
-`show --json` carries a `rev`. Pass it back as `--if-rev <rev>` to reject an
-operation prepared against a stale read:
+`show --json` carries a `rev`; pass it back to reject an operation prepared
+against a stale read:
 
 ```bash
 rev=$(tk show a7b3 --json | jq -r .data.rev)
 tk edit a7b3 -t "New title" --if-rev "$rev"
 ```
 
-The lock only serializes cooperating `tk` processes. A Git checkout, an editor,
+The lock only serializes cooperating `tk` processes: a Git checkout, an editor,
 or an older `tk` binary writes without it, so re-read after a pull. To include a
 sync step in the same guarantee, run it under the lock; `--scan` locks every
-store under a path in sorted order:
+store under a path in sorted order.
 
 ```bash
 tk lock -- git pull --ff-only
@@ -249,18 +240,23 @@ advisory and not reentrant.
 
 ## Migrating a v0 Store
 
-The previous layout (`.tasks/config.json` plus one JSON document per task) is
-refused, not read. Convert it once with the script:
+The previous layout (`config.json` plus one JSON document per task) is refused,
+not read. Convert it once:
 
 ```bash
 tools/migrate-v0.py .tasks             # add --dry-run to plan only
+tk check                               # expect no findings
 ```
 
 It writes `store.json` and `records/`, keeps each task's old `project-ref` ID
 resolvable as a legacy alias, reuses the old ref as the new alias when it is
-unique, and rewrites the dependency graph. The old files move to
-`.tasks/legacy/`. The script is deliberately not a subcommand — it is meant to
-be deleted after the cutover.
+unique, rewrites the dependency graph, and moves the old files to
+`.tasks/legacy/`. It is deliberately not a subcommand — it is meant to be
+deleted after the cutover.
+
+**Stop v0 writers first.** An older `tk` sees zero tasks in a v1 store and will
+create v0 files beside the records; the v1 side refuses v0, the v0 side does not
+notice.
 
 ## Config
 
@@ -325,11 +321,19 @@ are ignored, so a newer writer's events do not break an older reader.
 ## Development
 
 ```bash
-cargo build
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+make fmt lint test            # or the same commands directly:
 cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+make build                    # release binary at ./tk
 ```
+
+The concurrency tests spawn eight processes each, so on a busy machine run the
+suite with `cargo test --all-targets -- --test-threads=3` to stay clear of the
+per-user process limit. `tests/migration.rs` needs `python3` and skips itself
+when it is missing.
+
+`make completions` prints fish completions; see above for other shells.
 
 ## License
 

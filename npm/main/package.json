@@ -1,7 +1,7 @@
 {
   "name": "@nijaru/tk",
-  "version": "0.1.1",
-  "description": "Minimal task tracker CLI",
+  "version": "1.0.0",
+  "description": "Minimal task tracker: append-only JSON records in .tasks/",
   "homepage": "https://github.com/nijaru/tk",
   "repository": {
     "type": "git",
@@ -15,10 +15,10 @@
     "node": ">=14"
   },
   "optionalDependencies": {
-    "@nijaru/tk-darwin-arm64": "0.1.1",
-    "@nijaru/tk-darwin-x64": "0.1.1",
-    "@nijaru/tk-linux-arm64": "0.1.1",
-    "@nijaru/tk-linux-x64": "0.1.1",
-    "@nijaru/tk-win32-x64": "0.1.1"
+    "@nijaru/tk-darwin-arm64": "1.0.0",
+    "@nijaru/tk-darwin-x64": "1.0.0",
+    "@nijaru/tk-linux-arm64": "1.0.0",
+    "@nijaru/tk-linux-x64": "1.0.0",
+    "@nijaru/tk-win32-x64": "1.0.0"
   }
 }
