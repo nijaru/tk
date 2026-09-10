@@ -3,7 +3,7 @@ source: tests/cli.rs
 expression: tree
 ---
 === tk ===
-tk 1.0.0
+tk 0.2.0
 Minimal task tracker. One JSON document per task in .tasks/ — no daemon, no
 index, no database.
 

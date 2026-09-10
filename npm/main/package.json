@@ -1,6 +1,6 @@
 {
   "name": "@nijaru/tk",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Minimal task tracker: one JSON document per task in .tasks/",
   "homepage": "https://github.com/nijaru/tk",
   "repository": {
@@ -15,10 +15,10 @@
     "node": ">=14"
   },
   "optionalDependencies": {
-    "@nijaru/tk-darwin-arm64": "1.0.0",
-    "@nijaru/tk-darwin-x64": "1.0.0",
-    "@nijaru/tk-linux-arm64": "1.0.0",
-    "@nijaru/tk-linux-x64": "1.0.0",
-    "@nijaru/tk-win32-x64": "1.0.0"
+    "@nijaru/tk-darwin-arm64": "0.2.0",
+    "@nijaru/tk-darwin-x64": "0.2.0",
+    "@nijaru/tk-linux-arm64": "0.2.0",
+    "@nijaru/tk-linux-x64": "0.2.0",
+    "@nijaru/tk-win32-x64": "0.2.0"
   }
 }
