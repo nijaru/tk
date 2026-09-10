@@ -12,7 +12,8 @@ it is meant to be deleted after the cutover.
 
 What it preserves:
 
-  * every task's fields, logs, and status (legacy `cancelled` becomes `closed`)
+  * every task's title, description, labels, status, and logs
+    (legacy `cancelled` becomes `closed`)
   * the old handle: the 4-character ref becomes the v1 alias when it is unique
     and unambiguous, and the old `project-ref` ID stays resolvable as a legacy
     alias either way, so references written before the migration still work
@@ -194,7 +195,6 @@ def plan(tasks: list[dict], config: dict) -> dict:
 def build_created(task: dict) -> dict:
     stamp = parse_ts(task.get("created_at", ""), now_ms())
     updated = parse_ts(task.get("updated_at", "") or task.get("created_at", ""), now_ms())
-    remap = task["_id_map"].get
     state = {
         "id": task["_new_id"],
         "alias": task["_alias"],
@@ -204,14 +204,8 @@ def build_created(task: dict) -> dict:
         "status": normalise_status(task.get("status")),
         "priority": int(task.get("priority", 3) or 3),
         "labels": [str(x) for x in (task.get("labels") or [])],
-        "assignees": [str(x) for x in (task.get("assignees") or [])],
-        "assignee": task.get("assignee"),
-        "attempt": int(task.get("attempt", 0) or 0),
         "parent": task["_parent"],
         "blocked_by": task["_blocked_by"],
-        "related": [remap(r, r) for r in (task.get("related") or [])],
-        "estimate": task.get("estimate"),
-        "due_date": task.get("due_date"),
         "logs": [],
         "created_at": stamp,
         "updated_at": updated,
@@ -244,7 +238,11 @@ def write_store(store: Path, tasks: list[dict], config: dict, dry_run: bool) -> 
         "format": FORMAT,
         "version": 1,
         "project": config.get("project", "tk"),
-        "defaults": config.get("defaults") or {},
+        "defaults": {
+            key: value
+            for key, value in (config.get("defaults") or {}).items()
+            if key in {"priority", "labels"}
+        },
         "clean_after": config.get("clean_after", 14),
     }
     if config.get("aliases"):

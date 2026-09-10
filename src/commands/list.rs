@@ -1,5 +1,6 @@
 //! `tk list` / `tk ready`
 
+use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
@@ -32,19 +33,13 @@ pub struct List {
     /// Filter by label
     #[usage(short = 'l', long)]
     pub label: Option<String>,
-    /// Filter by assignee
-    #[usage(long)]
-    pub assignee: Option<String>,
     /// Filter by parent task
     #[usage(long)]
     pub parent: Option<String>,
     /// Top-level tasks only
     #[usage(long)]
     pub roots: bool,
-    /// Overdue tasks only
-    #[usage(long)]
-    pub overdue: bool,
-    /// Limit results
+    /// Limit results (default 20)
     #[usage(short = 'n', long, default = "20")]
     pub limit: i64,
 }
@@ -61,8 +56,16 @@ impl RunWith<AppCtx> for List {
 }
 
 pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<TaskView>> {
-    let status = cmd.status.map(|s| Status::parse(&s)).transpose()?;
-    let priority = cmd.priority.map(|p| Priority::parse(&p)).transpose()?;
+    let status = cmd
+        .status
+        .map(|s| Status::parse(&s))
+        .transpose()
+        .into_diagnostic()?;
+    let priority = cmd
+        .priority
+        .map(|p| Priority::parse(&p))
+        .transpose()
+        .into_diagnostic()?;
     let parent = cmd.parent.map(|p| resolve(ctx, &p)).transpose()?.map(Some);
     let hide_terminal = !cmd.all && !cmd.archived && !status.is_some_and(|s| s.is_terminal());
 
@@ -74,10 +77,8 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<TaskView>> {
         priority,
         project: cmd.project.unwrap_or_default(),
         label: cmd.label.unwrap_or_default(),
-        assignee: cmd.assignee.unwrap_or_default(),
         parent,
         roots: cmd.roots,
-        overdue: cmd.overdue,
         include_archived: cmd.all || cmd.archived,
         archived_only: cmd.archived,
         limit: if cmd.all {
@@ -88,7 +89,7 @@ pub fn run_list(ctx: &AppCtx, cmd: List) -> miette::Result<Vec<TaskView>> {
     })?)
 }
 
-/// List active/open unblocked tasks
+/// List active/open tasks that nothing is blocking
 #[derive(Args)]
 pub struct Ready;
 

@@ -77,10 +77,6 @@ pub enum Commands {
     Block(crate::commands::Block),
     /// Remove a blocker dependency
     Unblock(crate::commands::Unblock),
-    /// Record a non-blocking relationship with another task
-    Relate(crate::commands::Relate),
-    /// Remove a non-blocking relationship
-    Unrelate(crate::commands::Unrelate),
     /// Delete a task record
     #[usage(alias = "rm")]
     Purge(crate::commands::Purge),
@@ -135,16 +131,33 @@ pub fn run() -> miette::Result<()> {
 
 /// The failure's kind, for the JSON envelope.
 ///
-/// Tries the concrete error first, then whatever miette carries, so a store
-/// failure keeps its specific kind instead of collapsing to `error`.
+/// Recovered from the error's concrete type: miette's own `code()` is left empty
+/// so human-facing output stays clean, which means the caller walks the types it
+/// knows about. Unknown failures report `error`.
 fn error_code(err: &miette::Report) -> String {
-    if let Some(store_error) = err.downcast_ref::<crate::store::StoreError>() {
+    use crate::model::ModelError;
+    use crate::output::InputError;
+    use crate::store::StoreError;
+    use crate::{ids::IdError, output::code};
+
+    if let Some(store_error) = err.downcast_ref::<StoreError>() {
         return store_error.code().to_owned();
     }
-    match err.code() {
-        Some(code) => code.to_string(),
-        None => crate::output::code::ERROR.to_owned(),
+    if err.downcast_ref::<InputError>().is_some() {
+        return code::INVALID_INPUT.to_owned();
     }
+    if let Some(id_error) = err.downcast_ref::<IdError>() {
+        return match id_error {
+            IdError::NotFound(_) => code::NOT_FOUND,
+            IdError::Ambiguous { .. } => code::AMBIGUOUS,
+            IdError::BadProject(_) | IdError::TooShort(_) => code::INVALID_INPUT,
+        }
+        .to_owned();
+    }
+    if err.downcast_ref::<ModelError>().is_some() {
+        return code::INVALID_INPUT.to_owned();
+    }
+    code::ERROR.to_owned()
 }
 
 impl Commands {
@@ -172,8 +185,6 @@ impl Commands {
             Self::Log(_) => "log",
             Self::Block(_) => "block",
             Self::Unblock(_) => "unblock",
-            Self::Relate(_) => "relate",
-            Self::Unrelate(_) => "unrelate",
             Self::Purge(_) => "purge",
             Self::Recover(_) => "recover",
             Self::Mv(_) => "mv",

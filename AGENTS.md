@@ -12,6 +12,7 @@ binary, no runtime.
 | `src/cli.rs`       | Root `Cli` derive, global flags (`-j/--json`, `-C/--dir`), error envelope |
 | `src/commands/`    | One module per command; `misc.rs` holds Init/Mv/Clean/Check/Purge/Recover/Path/Lock, `detail.rs` the detail fields, `batch.rs` the `apply` entry point |
 | `src/model.rs`     | `TaskState`, `TaskView`, `Config`, `Status`, `Priority` — lenient serde |
+| `src/ops.rs`       | `Mutation` (the lock decision) and every task operation. The CLI and `apply` both call these; nothing else appends events. |
 | `src/record.rs`    | The event log: `Event`, `Record`, append, fold, torn-tail recovery |
 | `src/store.rs`     | `Ctx` (location + format gate), `Store` (reads, lock-free appends), `Txn` (locked operations), list/filter, integrity |
 | `src/ids.rs`       | ULID generation, aliases, reference resolution                 |
@@ -71,13 +72,24 @@ checkout.
   are gone (identity is a ULID), `tk repair` became `tk recover`, `tk rm` became
   `tk purge` (refuses while referenced), and `tk add` no longer bootstraps a
   store.
+- Scope, decided by evidence rather than taste: across 169 real tasks, no due
+  date, estimate, assignee, or non-blocking relation was ever used, so those
+  fields and their commands were removed along with the calendar arithmetic they
+  required. Reserved fields were removed too — an event log makes them
+  unnecessary, because unknown `op`s are ignored and new state fields deserialize
+  with defaults, so a future `assignee` or `attempt` is additive. `.local/simplify-plan.md`
+  records the measurements.
+- What is deliberately *not* in scope: due dates, estimates, assignment, claims,
+  and non-blocking relations. Reinstating one is an additive event op plus a
+  state field; the deleted date math is the only real work.
 
 ## Code Standards
 
 | Aspect         | Standard                                                                 |
 | -------------- | ------------------------------------------------------------------------ |
 | Durability     | Appends fsync the file (and the directory, when the record is new); `store.json` writes use temp-file + fsync + rename |
-| Locking        | `Store` = reads and lock-free appends (LWW/commutative ops). `Txn` = holds `<store>/.lock` and owns every composite operation: create, block, `--if-rev`, multi-record, apply. Never open two transactions on one store. |
+| Locking        | `Mutation::free` = reads plus appends that are last-writer-wins or commutative. `Mutation::locked` holds `<store>/.lock` and is required by create, block, `--if-rev`, multi-record operations, and `apply`. An operation that needs the lock asks for it, so forgetting it is a loud internal error, not a silent race. Never open two transactions on one store. |
+| Operations     | One implementation per change, in `ops.rs`. A command is resolve → call → emit; `tk apply` dispatches to the same functions. Adding a second implementation of an operation is how the two paths drift, and `tests/cli.rs::cli_and_apply_produce_the_same_task` is what catches it. |
 | Reads          | Take no lock and never repair; `show` reports, `check` reports for the store, `recover` truncates a torn tail |
 | Identity       | ULID + immutable alias; `project` is display only. Resolution: alias → ID → unique prefix |
 | Revision       | `rev` is `writer:line_count:content_hash8`; `--if-rev` compares under the lock so it means something |

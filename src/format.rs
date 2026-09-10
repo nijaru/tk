@@ -96,16 +96,6 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
     let title = truncate(&t.task.title, 50);
 
     if color {
-        let sc = if t.is_overdue {
-            Style::RedBold
-        } else if t
-            .days_until_due
-            .is_some_and(|d| d <= timeutil::DUE_SOON_THRESHOLD)
-        {
-            Style::Yellow
-        } else {
-            status_style(t.task.status)
-        };
         let tc = if t.task.status == Status::Done {
             Style::Dim
         } else {
@@ -115,7 +105,7 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
             "{:<w$} | {} | {} | {}",
             t.task.alias,
             paint(color, &prio, priority_style(t.task.priority)),
-            paint(color, &status, sc),
+            paint(color, &status, status_style(t.task.status)),
             paint(color, &title, tc),
         );
     }
@@ -124,16 +114,8 @@ fn format_task_row_w(t: &TaskView, color: bool, w: usize) -> String {
     if t.task.is_archived() {
         markers += " [archived]";
     }
-    if t.is_overdue {
-        markers += " [OVERDUE]";
-    } else if let Some(d) = t.days_until_due
-        && d <= timeutil::DUE_SOON_THRESHOLD
-    {
-        if d == 0 {
-            markers += " [due today]";
-        } else {
-            markers += &format!(" [due {d}d]");
-        }
+    if t.blocked_by_incomplete {
+        markers += " [blocked]";
     }
     format!(
         "{:<w$} | {prio} | {status} | {title}{markers}",
@@ -169,14 +151,9 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
     if !task.title.is_empty() {
         lines.push(format!("Title:       {}", task.title));
     }
-    let sc = if t.is_overdue {
-        Style::RedBold
-    } else {
-        status_style(task.status)
-    };
     lines.push(format!(
         "Status:      {}",
-        paint(color, &task.status.to_string(), sc)
+        paint(color, &task.status.to_string(), status_style(task.status))
     ));
     lines.push(format!(
         "Priority:    {}",
@@ -188,32 +165,8 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
     if !task.labels.is_empty() {
         lines.push(format!("Labels:      {}", task.labels.join(", ")));
     }
-    if !task.assignees.is_empty() {
-        lines.push(format!("Assignees:   {}", task.assignees.join(", ")));
-    }
-    if let Some(a) = &task.assignee {
-        lines.push(format!("Assignee:    {a}"));
-    }
     if let Some(p) = &t.parent_ref {
         lines.push(format!("Parent:      {p}"));
-    }
-    if let Some(e) = task.estimate {
-        lines.push(format!("Estimate:    {e}"));
-    }
-    if let Some(d) = &task.due_date {
-        let mut due = d.clone();
-        if t.is_overdue {
-            due += &paint(color, " [OVERDUE]", Style::RedBold);
-        } else if let Some(n) = t.days_until_due
-            && n <= timeutil::DUE_SOON_THRESHOLD
-        {
-            if n == 0 {
-                due += &paint(color, " [due today]", Style::Yellow);
-            } else {
-                due += &paint(color, &format!(" [due {n}d]"), Style::Yellow);
-            }
-        }
-        lines.push(format!("Due:         {due}"));
     }
     lines.push(format!(
         "Created:     {}",
@@ -247,9 +200,6 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
             " (resolved)"
         };
         lines.push(format!("Blockers:    {}{state}", t.blocker_refs.join(", ")));
-    }
-    if !t.task.related.is_empty() {
-        lines.push(format!("Related:     {}", t.related_refs.join(", ")));
     }
     if let Some(c) = &task.checkpoint {
         lines.push(String::new());
@@ -311,22 +261,21 @@ pub fn format_config(config: &Config) -> String {
             config.defaults.labels.join(", ")
         ));
     }
-    if !config.defaults.assignees.is_empty() {
-        lines.push(format!(
-            "Def Assigns: {}",
-            config.defaults.assignees.join(", ")
-        ));
-    }
     lines.push(format!("Def Prio:    {}", config.defaults.priority.name()));
     if let Some(aliases) = &config.aliases
         && !aliases.is_empty()
     {
         lines.push(String::new());
         lines.push("Aliases:".to_owned());
-        for (k, v) in aliases {
-            lines.push(format!("  {k:<10} -> {v}"));
+        for (name, path) in aliases {
+            lines.push(format!("  {name:<10} -> {path}"));
         }
     }
+    lines.push(String::new());
+    lines.push(
+        "Change a setting with: tk config set <project|priority|labels|clean-after> <value>"
+            .to_owned(),
+    );
     lines.join("\n")
 }
 
@@ -347,14 +296,8 @@ mod tests {
                 status: Status::Open,
                 priority: Priority::Urgent,
                 labels: vec![],
-                assignees: vec![],
-                assignee: None,
-                attempt: 0,
                 parent: None,
                 blocked_by: vec![],
-                related: vec![],
-                estimate: None,
-                due_date: Some("2000-01-01".into()),
                 logs: vec![LogEntry {
                     ts: "2026-01-10T12:00:00.000000000Z".into(),
                     msg: "note".into(),
@@ -372,10 +315,7 @@ mod tests {
             blocked_by_incomplete: false,
             unresolved_blockers: Vec::new(),
             blocker_refs: Vec::new(),
-            related_refs: Vec::new(),
             parent_ref: None,
-            is_overdue: true,
-            days_until_due: None,
         }
     }
 
@@ -395,7 +335,23 @@ mod tests {
             !table.contains("01j8x0m5r7000000000000000a"),
             "the 26-character ID must not widen every row: {table}"
         );
-        assert!(table.contains("[OVERDUE]"), "{table}");
+    }
+
+    #[test]
+    fn a_blocked_task_is_marked() {
+        let mut t = sample();
+        t.blocked_by_incomplete = true;
+        t.task.blocked_by = vec!["01m25qbfpr5ekbr9zxh0xc93kx".into()];
+        t.blocker_refs = vec!["vp80".into()];
+        let table = format_task_list(std::slice::from_ref(&t), "", false);
+        assert!(table.contains("[blocked]"), "{table}");
+
+        let detail = format_task_detail(&t, false);
+        assert!(detail.contains("Blockers:    vp80 (blocked)"), "{detail}");
+        assert!(
+            !detail.contains("Blockers:    01m25qbf"),
+            "the blocker line must not lead with a ULID: {detail}"
+        );
     }
 
     #[test]
@@ -404,27 +360,10 @@ mod tests {
         let detail = format_task_detail(&t, false);
         assert!(detail.contains("01j8x0m5r7000000000000000a"), "{detail}");
         assert!(detail.contains("Ref:         a7b3"), "{detail}");
-        assert!(detail.contains("[OVERDUE]"), "{detail}");
         // Nano timestamps must render, not pass through raw.
         assert!(
             !detail.contains("2026-01-10T12:00:00.000000000Z"),
             "{detail}"
-        );
-    }
-
-    #[test]
-    fn references_render_as_aliases_not_ulids() {
-        let mut t = sample();
-        t.task.blocked_by = vec!["01m25qbfpr5ekbr9zxh0xc93kx".into()];
-        t.blocker_refs = vec!["vp80".into()];
-        t.blocked_by_incomplete = true;
-        t.parent_ref = Some("jvv2".into());
-        let detail = format_task_detail(&t, false);
-        assert!(detail.contains("Blockers:    vp80 (blocked)"), "{detail}");
-        assert!(detail.contains("Parent:      jvv2"), "{detail}");
-        assert!(
-            !detail.contains("Blockers:    01m25qbf"),
-            "the blocker line must not lead with a ULID: {detail}"
         );
     }
 }

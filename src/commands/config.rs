@@ -1,7 +1,8 @@
-//! `tk config` — nested configuration commands.
+//! `tk config` — the store's settings.
 //!
-//! Bare `tk config` (and bare intermediate nodes) show the relevant section,
-//! mirroring the old Kong `default:"1"` behavior via `Option` subcommands.
+//! Bare `tk config` shows everything; `tk config set` changes one key. The keys
+//! are few enough that a nested subcommand per key (and a sub-subcommand per
+//! `clean-after` field) was more interface than data.
 
 use usage::{Args, RunWith, Subcommands};
 
@@ -9,8 +10,9 @@ use crate::cli::AppCtx;
 use crate::format;
 use crate::ids;
 use crate::model::Priority;
+use crate::ops::{self, Mutation};
 
-/// Show or set configuration
+/// Show or change store settings
 #[derive(Args)]
 pub struct Config {
     #[usage(subcommand)]
@@ -20,17 +22,12 @@ pub struct Config {
 #[derive(Subcommands)]
 #[usage(run_with)]
 pub enum ConfigCmd {
-    /// Show configuration
-    Show(ConfigShow),
-    /// Get or set the default project
-    Project(ProjectArgs),
+    /// Set one setting: project, priority, labels, or clean-after
+    Set(ConfigSet),
     /// Manage directory aliases for -C
     Alias(ConfigAlias),
-    /// Show or set default values
-    Defaults(DefaultsArgs),
-    /// Configure auto-cleanup
-    #[usage(name = "clean-after")]
-    CleanAfter(CleanAfterArgs),
+    /// Rename a project in every task that uses it
+    Project(ProjectArgs),
 }
 
 impl RunWith<AppCtx> for Config {
@@ -39,137 +36,115 @@ impl RunWith<AppCtx> for Config {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         match self.command {
             Some(cmd) => cmd.run_with(ctx),
-            None => ConfigShow.run_with(ctx),
+            None => {
+                let config = ctx.store.load_config()?;
+                let human = format::format_config(&config);
+                ctx.emit("config", &config, None, Vec::new(), || human);
+                Ok(())
+            }
         }
     }
 }
 
-/// Show configuration
-#[derive(Args)]
-pub struct ConfigShow;
+// ---------------------------------------------------------------------------
+// set
+// ---------------------------------------------------------------------------
 
-impl RunWith<AppCtx> for ConfigShow {
+/// Set one setting
+#[derive(Args)]
+pub struct ConfigSet {
+    /// project | priority | labels | clean-after
+    pub key: String,
+    /// New value ("off" disables clean-after; an empty labels list clears them)
+    pub value: String,
+}
+
+const KEYS: &str = "project, priority, labels, clean-after";
+
+impl RunWith<AppCtx> for ConfigSet {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let config = ctx.store.load_config()?;
-        let human = format::format_config(&config);
-        ctx.emit("config", &config, None, Vec::new(), || human);
-        Ok(())
-    }
-}
-
-// --- project ---
-
-/// Get or set the default project
-#[derive(Args)]
-pub struct ProjectArgs {
-    #[usage(subcommand)]
-    pub command: Option<ProjectCmd>,
-}
-
-#[derive(Subcommands)]
-#[usage(run_with)]
-pub enum ProjectCmd {
-    /// Show default project
-    Show(ProjectShow),
-    /// Set default project
-    Set(ProjectSet),
-    /// Rename project and all its tasks
-    Rename(ProjectRename),
-}
-
-impl RunWith<AppCtx> for ProjectArgs {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        match self.command {
-            Some(cmd) => cmd.run_with(ctx),
-            None => ProjectShow.run_with(ctx),
-        }
-    }
-}
-
-/// Show default project
-#[derive(Args)]
-pub struct ProjectShow;
-
-impl RunWith<AppCtx> for ProjectShow {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let config = ctx.store.load_config()?;
-        let human = format!("Default project: {}", config.project);
-        ctx.emit(
-            "config",
-            &serde_json::json!({"project": config.project}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Set default project
-#[derive(Args)]
-pub struct ProjectSet {
-    /// Project name to set
-    pub name: String,
-}
-
-impl RunWith<AppCtx> for ProjectSet {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ids::validate_project(&self.name)?;
-        let name = self.name.clone();
+        let key = self.key.trim().to_lowercase();
+        let value = self.value.trim().to_owned();
         let txn = ctx.store.txn()?;
-        let config = txn.update_config(|c| c.project = name.clone())?;
-        let human = format!("Default project set to {:?}", config.project);
-        ctx.emit(
-            "config",
-            &serde_json::json!({"project": config.project}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Rename project and all its tasks
-#[derive(Args)]
-pub struct ProjectRename {
-    /// Old project name
-    pub old: String,
-    /// New project name
-    pub new: String,
-}
-
-impl RunWith<AppCtx> for ProjectRename {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let txn = ctx.store.txn()?;
-        let res = txn.rename_project(&self.old, &self.new)?;
-        let data = serde_json::json!({
-            "old": self.old,
-            "new": self.new,
-            "renamed": res.renamed,
-        });
-        let human = format!(
-            "Renamed project {:?} -> {:?}\n  Updated {} tasks",
-            self.old,
-            self.new,
-            res.renamed.len()
-        );
+        let (data, human) = match key.as_str() {
+            "project" => {
+                ids::validate_project(&value)?;
+                let config = txn.update_config(|c| c.project = value.clone())?;
+                (
+                    serde_json::json!({"project": config.project}),
+                    format!("Default project set to {:?}.", config.project),
+                )
+            }
+            "priority" => {
+                let priority = Priority::parse(&value)?;
+                txn.update_config(|c| c.defaults.priority = priority)?;
+                (
+                    serde_json::json!({"priority": priority as u8}),
+                    format!("Default priority set to {}.", priority.name()),
+                )
+            }
+            "labels" => {
+                let labels: Vec<String> = value
+                    .split(',')
+                    .map(|l| l.trim().to_owned())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                txn.update_config(|c| c.defaults.labels = labels.clone())?;
+                (
+                    serde_json::json!({"labels": labels}),
+                    if labels.is_empty() {
+                        "Default labels cleared.".to_owned()
+                    } else {
+                        format!("Default labels set to {}.", labels.join(", "))
+                    },
+                )
+            }
+            "clean-after" => {
+                let (enabled, days) = match value.as_str() {
+                    "off" | "false" | "never" | "0" => (false, 0),
+                    other => {
+                        let days: i64 = other.parse().map_err(|_| {
+                            crate::output::invalid(format!(
+                                "invalid clean-after value {other:?}: use a number of days or \"off\""
+                            ))
+                        })?;
+                        if days < 0 {
+                            return Err(crate::output::invalid(
+                                "clean-after must be a non-negative number of days, or \"off\"",
+                            ));
+                        }
+                        (true, days)
+                    }
+                };
+                txn.update_config(|c| {
+                    c.clean_after.enabled = enabled;
+                    c.clean_after.days = days;
+                })?;
+                (
+                    serde_json::json!({"clean_after": {"enabled": enabled, "days": days}}),
+                    if enabled {
+                        format!("Auto-clean enabled: archive completed tasks after {days} days.")
+                    } else {
+                        "Auto-clean disabled.".to_owned()
+                    },
+                )
+            }
+            other => {
+                return Err(crate::output::invalid(format!(
+                    "unknown setting {other:?}: expected one of {KEYS}"
+                )));
+            }
+        };
         ctx.emit("config", &data, None, Vec::new(), || human);
         Ok(())
     }
 }
 
-// --- alias ---
+// ---------------------------------------------------------------------------
+// alias
+// ---------------------------------------------------------------------------
 
 /// Manage directory aliases for -C
 #[derive(Args)]
@@ -188,11 +163,11 @@ impl RunWith<AppCtx> for ConfigAlias {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         if let Some(name) = self.name.clone() {
+            let txn = ctx.store.txn()?;
             if self.rm {
-                let txn = ctx.store.txn()?;
                 txn.update_config(|c| {
-                    if let Some(a) = c.aliases.as_mut() {
-                        a.remove(&name);
+                    if let Some(aliases) = c.aliases.as_mut() {
+                        aliases.remove(&name);
                     }
                 })?;
                 let human = format!("Removed alias {name:?}");
@@ -206,17 +181,16 @@ impl RunWith<AppCtx> for ConfigAlias {
                 return Ok(());
             }
             if let Some(path) = self.path.clone() {
-                let txn = ctx.store.txn()?;
                 let config = txn.update_config(|c| {
                     c.aliases
                         .get_or_insert_default()
                         .insert(name.clone(), path.clone());
                 })?;
-                let back = config.aliases.as_ref().and_then(|a| a.get(&name)).cloned();
-                let human = format!("Alias {name:?} -> {back:?} set");
+                let stored = config.aliases.as_ref().and_then(|a| a.get(&name)).cloned();
+                let human = format!("Alias {name:?} -> {stored:?} set");
                 ctx.emit(
                     "config",
-                    &serde_json::json!({"alias": name, "path": back}),
+                    &serde_json::json!({"alias": name, "path": stored}),
                     None,
                     Vec::new(),
                     || human,
@@ -224,14 +198,13 @@ impl RunWith<AppCtx> for ConfigAlias {
                 return Ok(());
             }
         }
-        let config = ctx.store.load_config()?;
-        let aliases = config.aliases.clone().unwrap_or_default();
+        let aliases = ctx.store.load_config()?.aliases.unwrap_or_default();
         let human = if aliases.is_empty() {
             "No aliases configured.".to_owned()
         } else {
             let mut out = "Aliases:".to_owned();
-            for (k, v) in &aliases {
-                out.push_str(&format!("\n  {k:<10} -> {v}"));
+            for (name, path) in &aliases {
+                out.push_str(&format!("\n  {name:<10} -> {path}"));
             }
             out
         };
@@ -246,270 +219,62 @@ impl RunWith<AppCtx> for ConfigAlias {
     }
 }
 
-// --- defaults ---
+// ---------------------------------------------------------------------------
+// project
+// ---------------------------------------------------------------------------
 
-/// Show or set default values
+/// Rename a project in every task that uses it
 #[derive(Args)]
-pub struct DefaultsArgs {
+pub struct ProjectArgs {
     #[usage(subcommand)]
-    pub command: Option<DefaultsCmd>,
+    pub command: ProjectCmd,
 }
 
 #[derive(Subcommands)]
 #[usage(run_with)]
-pub enum DefaultsCmd {
-    /// Show default values
-    Show(DefaultsShow),
-    /// Set default priority
-    Priority(DefaultsPriority),
-    /// Set default labels
-    Labels(DefaultsLabels),
-    /// Set default assignees
-    Assignees(DefaultsAssignees),
+pub enum ProjectCmd {
+    /// Rename a project in every task that uses it
+    Rename(ProjectRename),
 }
 
-impl RunWith<AppCtx> for DefaultsArgs {
+impl RunWith<AppCtx> for ProjectArgs {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        match self.command {
-            Some(cmd) => cmd.run_with(ctx),
-            None => DefaultsShow.run_with(ctx),
-        }
+        self.command.run_with(ctx)
     }
 }
 
-/// Show default values
+/// Rename a project in every task that uses it
+///
+/// A project is a display field, so this changes one field per task and rewrites
+/// no references.
 #[derive(Args)]
-pub struct DefaultsShow;
+pub struct ProjectRename {
+    /// Current project name
+    pub old: String,
+    /// New project name
+    pub new: String,
+}
 
-impl RunWith<AppCtx> for DefaultsShow {
+impl RunWith<AppCtx> for ProjectRename {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let config = ctx.store.load_config()?;
+        let m = Mutation::locked(&ctx.store)?;
+        let result = ops::rename_project(&m, &self.old, &self.new)?;
+        let data = serde_json::json!({
+            "old": self.old,
+            "new": self.new,
+            "renamed": result.renamed,
+        });
         let human = format!(
-            "Defaults:\n  Priority:  {}\n  Labels:    {:?}\n  Assignees: {:?}",
-            config.defaults.priority as u8, config.defaults.labels, config.defaults.assignees
+            "Renamed project {:?} -> {:?}\n  Updated {} tasks",
+            self.old,
+            self.new,
+            result.renamed.len()
         );
-        ctx.emit(
-            "config",
-            &serde_json::json!({"defaults": config.defaults}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Set default priority
-#[derive(Args)]
-pub struct DefaultsPriority {
-    /// Default priority level (0-4)
-    pub level: u8,
-}
-
-impl RunWith<AppCtx> for DefaultsPriority {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let p =
-            Priority::from_u8(self.level).ok_or_else(|| miette::miette!("priority must be 0-4"))?;
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.defaults.priority = p)?;
-        let human = format!("Default priority set to {}", p.short());
-        ctx.emit(
-            "config",
-            &serde_json::json!({"priority": p as u8}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Set default labels
-#[derive(Args)]
-pub struct DefaultsLabels {
-    /// Default labels (comma-separated)
-    #[usage(delimiter = ',')]
-    pub labels: Vec<String>,
-}
-
-impl RunWith<AppCtx> for DefaultsLabels {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let labels = self.labels.clone();
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.defaults.labels = labels.clone())?;
-        let human = format!("Default labels set to {labels:?}");
-        ctx.emit(
-            "config",
-            &serde_json::json!({"labels": labels}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Set default assignees
-#[derive(Args)]
-pub struct DefaultsAssignees {
-    /// Default assignees (comma-separated)
-    #[usage(delimiter = ',')]
-    pub assignees: Vec<String>,
-}
-
-impl RunWith<AppCtx> for DefaultsAssignees {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let assignees = self.assignees.clone();
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.defaults.assignees = assignees.clone())?;
-        let human = format!("Default assignees set to {assignees:?}");
-        ctx.emit(
-            "config",
-            &serde_json::json!({"assignees": assignees}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-// --- clean-after ---
-
-/// Configure auto-cleanup
-#[derive(Args)]
-pub struct CleanAfterArgs {
-    #[usage(subcommand)]
-    pub command: Option<CleanAfterCmd>,
-}
-
-#[derive(Subcommands)]
-#[usage(run_with)]
-pub enum CleanAfterCmd {
-    /// Show clean-after config
-    Show(CleanAfterShow),
-    /// Enable auto-clean
-    Enable(CleanAfterEnable),
-    /// Disable auto-clean
-    Disable(CleanAfterDisable),
-    /// Set clean-after days
-    Days(CleanAfterDays),
-}
-
-impl RunWith<AppCtx> for CleanAfterArgs {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        match self.command {
-            Some(cmd) => cmd.run_with(ctx),
-            None => CleanAfterShow.run_with(ctx),
-        }
-    }
-}
-
-/// Show clean-after config
-#[derive(Args)]
-pub struct CleanAfterShow;
-
-impl RunWith<AppCtx> for CleanAfterShow {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let config = ctx.store.load_config()?;
-        let status = if config.clean_after.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        let human = format!("Clean After: {status} ({} days)", config.clean_after.days);
-        ctx.emit(
-            "config",
-            &serde_json::json!({"clean_after": config.clean_after}),
-            None,
-            Vec::new(),
-            || human,
-        );
-        Ok(())
-    }
-}
-
-/// Enable auto-clean
-#[derive(Args)]
-pub struct CleanAfterEnable;
-
-impl RunWith<AppCtx> for CleanAfterEnable {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.clean_after.enabled = true)?;
-        ctx.emit(
-            "config",
-            &serde_json::json!({"clean_after": {"enabled": true}}),
-            None,
-            Vec::new(),
-            || "Auto-clean enabled.".to_owned(),
-        );
-        Ok(())
-    }
-}
-
-/// Disable auto-clean
-#[derive(Args)]
-pub struct CleanAfterDisable;
-
-impl RunWith<AppCtx> for CleanAfterDisable {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.clean_after.enabled = false)?;
-        ctx.emit(
-            "config",
-            &serde_json::json!({"clean_after": {"enabled": false}}),
-            None,
-            Vec::new(),
-            || "Auto-clean disabled.".to_owned(),
-        );
-        Ok(())
-    }
-}
-
-/// Set clean-after days
-#[derive(Args)]
-pub struct CleanAfterDays {
-    /// Days after which to clean completed tasks
-    pub days: i64,
-}
-
-impl RunWith<AppCtx> for CleanAfterDays {
-    type Output = miette::Result<()>;
-
-    fn run_with(self, ctx: AppCtx) -> Self::Output {
-        if self.days < 0 {
-            return Err(miette::miette!("days must be >= 0"));
-        }
-        let days = self.days;
-        let txn = ctx.store.txn()?;
-        txn.update_config(|c| c.clean_after.days = days)?;
-        let human = format!("Clean-after days set to {days}.");
-        ctx.emit(
-            "config",
-            &serde_json::json!({"clean_after": {"days": days}}),
-            None,
-            Vec::new(),
-            || human,
-        );
+        ctx.emit("config", &data, None, Vec::new(), || human);
         Ok(())
     }
 }

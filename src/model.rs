@@ -259,26 +259,10 @@ pub struct TaskState {
     pub priority: Priority,
     #[serde(default, deserialize_with = "null_vec")]
     pub labels: Vec<String>,
-    #[serde(default, deserialize_with = "null_vec")]
-    pub assignees: Vec<String>,
-    /// Reserved: the single owner of this task, once ownership has meaning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<String>,
-    /// Reserved: how many times work has been attempted.
-    #[serde(default)]
-    pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     #[serde(default, deserialize_with = "null_vec")]
     pub blocked_by: Vec<String>,
-    /// Non-blocking task relationships: "see also", not "waits for". Stored
-    /// one-way; `links` stays reserved for documents.
-    #[serde(default, deserialize_with = "null_vec")]
-    pub related: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimate: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub due_date: Option<String>,
     #[serde(default, deserialize_with = "deserialize_logs")]
     pub logs: Vec<LogEntry>,
     pub created_at: String,
@@ -326,9 +310,6 @@ pub struct TaskView {
     /// Blockers that do not resolve to a record in the store.
     #[serde(default)]
     pub unresolved_blockers: Vec<String>,
-    /// The `related` list rendered as aliases, for the same reason as blockers.
-    #[serde(default)]
-    pub related_refs: Vec<String>,
     /// `blocked_by` rendered the way a person would type it: the blocker's
     /// alias when it resolves, otherwise a shortened ID.
     #[serde(default)]
@@ -336,8 +317,6 @@ pub struct TaskView {
     /// `parent` rendered as an alias, for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<String>,
-    pub is_overdue: bool,
-    pub days_until_due: Option<i64>,
 }
 
 impl TaskView {
@@ -478,11 +457,7 @@ pub enum ModelError {
     BadPriority(String),
 }
 
-impl miette::Diagnostic for ModelError {
-    fn code(&self) -> Option<Box<dyn fmt::Display + '_>> {
-        Some(Box::new(crate::output::code::INVALID_INPUT))
-    }
-}
+impl miette::Diagnostic for ModelError {}
 
 #[cfg(test)]
 mod tests {
@@ -541,35 +516,35 @@ mod tests {
         let s: TaskState = serde_json::from_str(
             r#"{"id":"01j8x0m5r7000000000000000a","alias":"a7b3","project":"tk",
                 "title":"t","status":"open","priority":3,"labels":null,
-                "assignees":null,"blocked_by":null,"logs":null,"links":null,
+                "blocked_by":null,"logs":null,"links":null,
                 "created_at":"x","updated_at":"y"}"#,
         )
         .unwrap();
         assert!(s.labels.is_empty());
-        assert!(s.assignees.is_empty());
         assert!(s.blocked_by.is_empty());
         assert!(s.logs.is_empty());
         assert!(s.links.is_empty());
         assert!(s.legacy_aliases.is_empty());
-        assert_eq!(s.attempt, 0);
-        assert!(s.assignee.is_none());
         assert!(!s.is_archived());
     }
 
     #[test]
-    fn round_trip_keeps_the_reserved_fields() {
+    fn round_trip_keeps_the_list_fields() {
         let s: TaskState = serde_json::from_str(created_json()).unwrap();
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""links":[]"#), "{json}");
-        assert!(json.contains(r#""attempt":0"#), "{json}");
+        assert!(json.contains(r#""blocked_by":[]"#), "{json}");
         assert!(!json.contains("checkpoint"), "{json}");
         let back: TaskState = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
     #[test]
-    fn unknown_fields_ignored() {
-        let raw = created_json().replace("}", r#","future_field":42}"#);
+    fn a_field_from_a_future_writer_is_ignored_not_fatal() {
+        // Forward compatibility is what makes reserved fields unnecessary: a
+        // newer writer's field or event is additive, and this reader ignores
+        // it rather than failing.
+        let raw = created_json().replace("}", r#","assignee":"nick","future_field":42}"#);
         let s: TaskState = serde_json::from_str(&raw).unwrap();
         assert_eq!(s.alias, "a7b3");
     }

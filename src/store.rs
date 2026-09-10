@@ -76,16 +76,15 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-impl miette::Diagnostic for StoreError {
-    /// Lets a `--json` failure carry its kind through miette's report wrapper.
-    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
-        Some(Box::new(StoreError::code(self)))
-    }
-}
+/// Satisfies the bound that lets `?` convert a store failure into a report.
+///
+/// Deliberately no `code()`: miette would print the machine kind in front of the
+/// message a human reads. The kind is recovered from the error's type in
+/// `cli::run` and appears only in the JSON envelope.
+impl miette::Diagnostic for StoreError {}
 
 impl StoreError {
-    /// Stable machine-readable kind, used as the JSON envelope's `error_code`
-    /// so a caller can branch on the failure without reading prose.
+    /// Stable machine-readable kind, for the JSON envelope's `error_code`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::TasksNotFound(_) | Self::ExplicitStoreMissing { .. } => code::STORE_NOT_FOUND,
@@ -878,17 +877,8 @@ impl<'a> Txn<'a> {
                     .labels
                     .clone()
                     .unwrap_or_else(|| config.defaults.labels.clone()),
-                assignees: opts
-                    .assignees
-                    .clone()
-                    .unwrap_or_else(|| config.defaults.assignees.clone()),
-                assignee: None,
-                attempt: 0,
                 parent: opts.parent.clone(),
                 blocked_by: Vec::new(),
-                related: Vec::new(),
-                estimate: opts.estimate,
-                due_date: opts.due_date.clone(),
                 logs: Vec::new(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -942,22 +932,16 @@ impl<'a> Txn<'a> {
 
     pub fn add_blocker(&self, id: &str, blocker: &str) -> Result<TaskView> {
         if id == blocker {
-            return Err(StoreError::Msg("task cannot block itself".into()));
+            return Err(StoreError::InvalidInput("task cannot block itself".into()));
         }
         self.require_task(blocker)?;
         if would_block_cycle(&self.store, id, blocker)? {
-            return Err(StoreError::Msg(format!(
+            return Err(StoreError::InvalidInput(format!(
                 "would create circular dependency: {id} is already blocked by {blocker} transitively"
             )));
         }
         self.store
             .append_and_view(id, op::BLOCK_ADD, serde_json::json!([blocker]))
-    }
-
-    /// Would adding this blocker create a cycle? Exposed so a batch can reject
-    /// the whole request before writing anything.
-    pub fn would_cycle(&self, id: &str, blocker: &str) -> Result<bool> {
-        would_block_cycle(&self.store, id, blocker)
     }
 
     pub fn remove_blocker(&self, id: &str, blocker: &str) -> Result<(TaskView, bool)> {
@@ -966,29 +950,6 @@ impl<'a> Txn<'a> {
         if found {
             self.store
                 .append(id, op::BLOCK_REMOVE, serde_json::json!([blocker]))?;
-        }
-        Ok((self.store.view_of(id)?, found))
-    }
-
-    /// Record a non-blocking relationship with another task.
-    ///
-    /// Both endpoints must exist. Stored one-way and not cycle-checked: it is a
-    /// "see also", not a constraint.
-    pub fn add_related(&self, id: &str, other: &str) -> Result<TaskView> {
-        if id == other {
-            return Err(StoreError::Msg("a task cannot be related to itself".into()));
-        }
-        self.require_task(other)?;
-        self.store
-            .append_and_view(id, op::RELATED_ADD, serde_json::json!([other]))
-    }
-
-    pub fn remove_related(&self, id: &str, other: &str) -> Result<(TaskView, bool)> {
-        let record = self.store.load(id)?;
-        let found = record.state.related.iter().any(|r| r == other);
-        if found {
-            self.store
-                .append(id, op::RELATED_REMOVE, serde_json::json!([other]))?;
         }
         Ok((self.store.view_of(id)?, found))
     }
@@ -1076,7 +1037,6 @@ impl<'a> Txn<'a> {
             }
             if record.state.blocked_by.iter().any(|b| b == id)
                 || record.state.parent.as_deref() == Some(id)
-                || record.state.related.iter().any(|r| r == id)
             {
                 referrers.push(record.id.clone());
             }
@@ -1097,11 +1057,6 @@ impl<'a> Txn<'a> {
             }
             if record.state.parent.as_deref() == Some(id) {
                 self.store.append(referrer, op::PARENT_CLEAR, Value::Null)?;
-                references_scrubbed += 1;
-            }
-            if record.state.related.iter().any(|r| r == id) {
-                self.store
-                    .append(referrer, op::RELATED_REMOVE, serde_json::json!([id]))?;
                 references_scrubbed += 1;
             }
         }
@@ -1264,11 +1219,6 @@ pub fn inconsistencies(ctx: &Ctx, record: &Record, expected_id: &str) -> Result<
             issues.push(format!("blocked by missing task {blocker}"));
         }
     }
-    for related in &record.state.related {
-        if !ctx.record_path(related).is_file() {
-            issues.push(format!("related to missing task {related}"));
-        }
-    }
     if let Some(parent) = &record.state.parent
         && !ctx.record_path(parent).is_file()
     {
@@ -1325,26 +1275,12 @@ pub fn enrich(ctx: &Ctx, record: &Record, index: &Index) -> TaskView {
             .map(|e| e.alias)
             .unwrap_or_else(|| short_id(p))
     });
-    let related_refs: Vec<String> = state
-        .related
-        .iter()
-        .map(|r| {
-            index
-                .lookup(ctx, r)
-                .map(|e| e.alias)
-                .unwrap_or_else(|| short_id(r))
-        })
-        .collect();
-    let done = state.status.is_terminal();
     TaskView {
         rev: record.rev(),
         blocked_by_incomplete,
         unresolved_blockers,
         blocker_refs,
-        related_refs,
         parent_ref,
-        is_overdue: timeutil::is_overdue(state.due_date.as_deref(), done),
-        days_until_due: timeutil::days_until_due(state.due_date.as_deref(), done),
         task: state.clone(),
     }
 }
@@ -1399,10 +1335,7 @@ pub struct CreateOptions {
     pub priority: Option<Priority>,
     pub project: Option<String>,
     pub labels: Option<Vec<String>>,
-    pub assignees: Option<Vec<String>>,
     pub parent: Option<String>,
-    pub estimate: Option<i64>,
-    pub due_date: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1442,10 +1375,8 @@ pub struct ListOptions {
     pub priority: Option<Priority>,
     pub project: String,
     pub label: String,
-    pub assignee: String,
     pub parent: Option<Option<String>>,
     pub roots: bool,
-    pub overdue: bool,
     /// Include archived tasks (they are hidden by default).
     pub include_archived: bool,
     /// Show archived tasks only.
@@ -1496,18 +1427,11 @@ fn matches_list(record: &Record, opts: &ListOptions) -> bool {
     if !opts.label.is_empty() && !state.labels.iter().any(|l| l == &opts.label) {
         return false;
     }
-    if !opts.assignee.is_empty() && !state.assignees.iter().any(|a| a == &opts.assignee) {
-        return false;
-    }
     if opts.roots && state.parent.is_some() {
         return false;
     }
     if let Some(parent) = &opts.parent
         && state.parent.as_ref() != parent.as_ref()
-    {
-        return false;
-    }
-    if opts.overdue && !timeutil::is_overdue(state.due_date.as_deref(), state.status.is_terminal())
     {
         return false;
     }
@@ -1531,26 +1455,12 @@ fn compare_records(a: &TaskState, b: &TaskState) -> std::cmp::Ordering {
         return ord;
     }
     if !a.status.is_terminal() {
-        // Overdue first.
-        let oa = timeutil::is_overdue(a.due_date.as_deref(), false);
-        let ob = timeutil::is_overdue(b.due_date.as_deref(), false);
-        let ord = ob.cmp(&oa);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-        // Priority (1-4, none last).
+        // Priority (1-4, none last), then oldest first: a task list is a queue,
+        // and a stable order helps callers diff two runs.
         let ord = a.priority.sort_key().cmp(&b.priority.sort_key());
         if ord != Ordering::Equal {
             return ord;
         }
-        // Due date (soonest first, undated last).
-        match (&a.due_date, &b.due_date) {
-            (Some(x), Some(y)) if x != y => return x.cmp(y),
-            (Some(_), None) => return Ordering::Less,
-            (None, Some(_)) => return Ordering::Greater,
-            _ => {}
-        }
-        // Oldest first: a task list is a queue, and stable order helps agents.
         return a.created_at.cmp(&b.created_at);
     }
     // Terminal: newest completion first.
@@ -1763,14 +1673,8 @@ mod tests {
                 status: Status::Open,
                 priority: Priority::Medium,
                 labels: Vec::new(),
-                assignees: Vec::new(),
-                assignee: None,
-                attempt: 0,
                 parent: None,
                 blocked_by: Vec::new(),
-                related: Vec::new(),
-                estimate: None,
-                due_date: None,
                 logs: Vec::new(),
                 created_at: "x".into(),
                 updated_at: "y".into(),

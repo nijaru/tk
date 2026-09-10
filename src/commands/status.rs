@@ -1,17 +1,14 @@
-//! `tk start/open/defer/done/close` — single-field status transitions.
+//! `tk start/open/defer/done/close` — status transitions.
 //!
-//! A status change is last-writer-wins, so it needs no lock: two agents setting
-//! a status at the same moment produce two events in some order, and the last
-//! one is the status. `completed_at` is derived during the fold from the
-//! transition itself, so it can never disagree with the status.
+//! A status change is a status change: it records what state the task is in, and
+//! nothing more. There is no claim and no ownership, so two people can both mark
+//! a task active; use `checkpoint` to say what you are doing about it.
 
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Status;
-use crate::record::op;
-
-use super::Writer;
+use crate::ops::{self, Mutation};
 
 macro_rules! status_cmd {
     ($name:ident, $command:literal, $status:expr, $verb:literal, $doc:literal) => {
@@ -26,10 +23,9 @@ macro_rules! status_cmd {
             type Output = miette::Result<()>;
 
             fn run_with(self, ctx: AppCtx) -> Self::Output {
-                let writer = Writer::new(&ctx, false)?;
-                let id = writer.store().resolve(&self.id)?;
-                writer.append(&id, op::STATUS, serde_json::json!($status), None)?;
-                let t = writer.view(&id)?;
+                let m = Mutation::free(&ctx.store)?;
+                let id = m.store().resolve(&self.id)?;
+                let t = ops::set_status(&m, &id, $status)?;
                 let human = format!("{} {}: {}", $verb, t.task.alias, t.task.title);
                 ctx.emit($command, &t, Some(t.rev.clone()), Vec::new(), || human);
                 Ok(())
@@ -43,7 +39,7 @@ status_cmd!(
     "start",
     Status::Active,
     "Started",
-    "Start working on a task (open → active)"
+    "Mark a task as being worked on (open → active)"
 );
 status_cmd!(
     Open,

@@ -36,13 +36,11 @@ Commands:
   purge       Delete a task record [aliases: rm]
   ready       List active/open unblocked tasks [aliases: rdy]
   recover     Drop a record's torn last line (from an interrupted write)
-  relate      Record a non-blocking relationship with another task
   show        Show task details
   start       Start working on a task (open → active) [aliases: active]
   unarchive   Return an archived task to active views
   unblock     Remove a blocker dependency
   unlink      Remove links from a task
-  unrelate    Remove a non-blocking relationship
   help        Print this message or the help of the given subcommand(s)
 
 Flags:
@@ -77,23 +75,19 @@ Arguments:
   <TITLE>…  Task title
 
 Flags:
-  -p, --priority <PRIORITY>    Priority (0-4, p0-p4, or
-                               none/urgent/high/medium/low)
-  -P, --project <PROJECT>      Project (display grouping; identity is
-                               unaffected)
-  -d, --desc <DESC>            Description
-  -l, --labels <LABELS>        Labels (comma-separated, repeatable)
-  -A, --assignees <ASSIGNEES>  Assignees (comma-separated, repeatable)
-      --parent <PARENT>        Parent task (alias, ID, or ID prefix)
-      --estimate <ESTIMATE>    Estimate (user-defined units)
-      --due <DUE>              Due date (YYYY-MM-DD or relative +Nh/+Nd/+Nw/+Nm)
-  -h, --help                   Print help
+  -p, --priority <PRIORITY>  Priority (0-4, p0-p4, or
+                             none/urgent/high/medium/low)
+  -P, --project <PROJECT>    Project (display grouping; identity is unaffected)
+  -d, --desc <DESC>          Description
+  -l, --labels <LABELS>      Labels (comma-separated, repeatable)
+      --parent <PARENT>      Parent task (alias, ID, or ID prefix)
+  -h, --help                 Print help
 
 Global flags:
-  -j, --json                   Output as JSON
-  -C, --dir <DIR>              Run in a different directory
-      --tasks-dir <DIR>        Task store directory: exact path, must already
-                               exist (no discovery)
+  -j, --json                 Output as JSON
+  -C, --dir <DIR>            Run in a different directory
+      --tasks-dir <DIR>      Task store directory: exact path, must already
+                             exist (no discovery)
 
 === tk list ===
 List tasks
@@ -110,11 +104,9 @@ Flags:
   -p, --priority <PRIORITY>  Filter by priority
   -P, --project <PROJECT>    Filter by project
   -l, --label <LABEL>        Filter by label
-      --assignee <ASSIGNEE>  Filter by assignee
       --parent <PARENT>      Filter by parent task
       --roots                Top-level tasks only
-      --overdue              Overdue tasks only
-  -n, --limit <LIMIT>        Limit results
+  -n, --limit <LIMIT>        Limit results (default 20)
                              (default: 20)
   -h, --help                 Print help
 
@@ -254,18 +246,12 @@ Flags:
   -l, --labels <LABELS>           Labels: `+add` a value, or bare values to
                                   replace the set
 
-                                  A leading `-` is read as a flag by the shell
-                                  and this parser alike, so removal is
-                                  `--remove-label`; `-l +x` and `--labels=-x`
-                                  both work.
+                                  A leading `-` reads as a flag to the shell and
+                                  this parser alike, so use `--remove-label`;
+                                  `-l +x` and `--labels=-x` both work.
       --remove-label <REMOVE_LABEL>  Labels to remove (comma-separated)
-  -A, --assignees <ASSIGNEES>     Assignees: `+add` a value, or bare values to
-                                  replace the set
-      --remove-assignee <REMOVE_ASSIGNEE>  Assignees to remove (comma-separated)
-      --due <DUE>                 Due date (YYYY-MM-DD, relative, or - to clear)
       --parent <PARENT>           Parent task (or - to clear)
   -d, --desc <DESC>               Description (or - to clear)
-      --estimate <ESTIMATE>       Estimate (or 0 to clear)
       --if-rev <REV>              Reject the edit unless the task still has this
                                   revision (`show --json`)
   -h, --help                      Print help
@@ -283,7 +269,7 @@ Usage: tk checkpoint [--clear] [--if-rev <REV>] <ID> [TEXT]…
 
 Arguments:
   <ID>     Task alias, ID, or ID prefix
-  [TEXT]…  Checkpoint text: current result, blocker, next action, verification
+  [TEXT]…  Current result, blocker, next action, verification
 
 Flags:
       --clear            Clear the checkpoint
@@ -298,15 +284,16 @@ Global flags:
                          (no discovery)
 
 === tk link ===
-Add links to relevant research, decisions, or source locations
+Add document links to a task
 
-A link is a document reference. Use `tk relate` for another task.
+A link is a document reference (a path or URL). Use `parent` or `block` for
+relationships between tasks.
 
-Usage: tk link <ID> [REFS]…
+Usage: tk link <ID> <REFS>…
 
 Arguments:
   <ID>     Task alias, ID, or ID prefix
-  [REFS]…  References to add (paths, URLs); with none, list them
+  <REFS>…  References to add
 
 Flags:
   -h, --help             Print help
@@ -320,11 +307,11 @@ Global flags:
 === tk unlink ===
 Remove links from a task
 
-Usage: tk unlink <ID> [REFS]…
+Usage: tk unlink <ID> <REFS>…
 
 Arguments:
   <ID>     Task alias, ID, or ID prefix
-  [REFS]…  References to remove
+  <REFS>…  References to remove
 
 Flags:
   -h, --help             Print help
@@ -342,7 +329,7 @@ Usage: tk accept [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
 Arguments:
   <ID>       Task alias, ID, or ID prefix
-  [VALUES]…  Values to add; with none and no flags, list them
+  [VALUES]…  Values to add
 
 Flags:
       --remove <TEXT>    Remove an exact value (repeatable)
@@ -362,7 +349,7 @@ Usage: tk evidence [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
 Arguments:
   <ID>       Task alias, ID, or ID prefix
-  [VALUES]…  Values to add; with none and no flags, list them
+  [VALUES]…  Values to add
 
 Flags:
       --remove <TEXT>    Remove an exact value (repeatable)
@@ -412,7 +399,10 @@ Global flags:
                          (no discovery)
 
 === tk log ===
-Add a log entry to a task
+Append a log entry to a task
+
+The log is history: entries are never edited or removed. Use `checkpoint` for
+the replaceable "where things stand" summary.
 
 Usage: tk log <ID> [MSG]…
 
@@ -436,7 +426,7 @@ Usage: tk block <ID> <BLOCKER>
 
 Arguments:
   <ID>       Task to block (alias, ID, or ID prefix)
-  <BLOCKER>  Blocking task (alias, ID, or ID prefix)
+  <BLOCKER>  Blocking task
 
 Flags:
   -h, --help             Print help
@@ -465,50 +455,11 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk relate ===
-Record a non-blocking relationship with another task
-
-`relate` is a "see also", not a constraint: it never blocks work and is never
-cycle-checked. Documents belong in `tk link`; this is for tasks.
-
-Usage: tk relate <ID> <OTHER>
-
-Arguments:
-  <ID>     Task alias, ID, or ID prefix
-  <OTHER>  Task to relate to
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk unrelate ===
-Remove a non-blocking relationship
-
-Usage: tk unrelate <ID> <OTHER>
-
-Arguments:
-  <ID>     Task alias, ID, or ID prefix
-  <OTHER>  Task to unrelate
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
 === tk purge ===
 Delete a task record
 
-Refuses while other tasks still reference it: those references would become
-dangling, and a broken graph is worse than a stale record.
+Refuses while other tasks still block on it or name it as a parent: those
+references would dangle, and a broken graph is worse than a stale record.
 
 Usage: tk purge [FLAGS] <ID>
 
@@ -553,7 +504,8 @@ Global flags:
 Move a task to a different project
 
 Identity is unaffected: a move changes one display field, and no reference
-anywhere needs rewriting.
+anywhere needs rewriting. To rename a project for every task in it, use `tk
+config project rename`.
 
 Usage: tk mv <SOURCE> <PROJECT>
 
@@ -593,11 +545,11 @@ Global flags:
 === tk clean ===
 Remove old completed tasks (archives by default)
 
-Usage: tk clean [FLAGS]
+Usage: tk clean [--older-than <OLDER_THAN>] [--purge]
 
 Flags:
-      --older-than <OLDER_THAN>  Remove tasks completed more than N days ago
-      --force                    Force clean even if disabled in config
+      --older-than <OLDER_THAN>  Age in days (default: the store's clean-after
+                                 setting)
       --purge                    Delete the records instead of archiving them
                                  (scrubs references)
   -h, --help                     Print help
@@ -668,12 +620,10 @@ Show or set configuration
 Usage: tk config <SUBCOMMAND>
 
 Commands:
-  alias        Manage directory aliases for -C
-  clean-after  Configure auto-cleanup
-  defaults     Show or set default values
-  project      Get or set the default project
-  show         Show configuration
-  help         Print this message or the help of the given subcommand(s)
+  alias    Manage directory aliases for -C
+  project  Rename a project in every task that uses it
+  set      Set one setting: project, priority, labels, or clean-after
+  help     Print this message or the help of the given subcommand(s)
 
 Flags:
   -h, --help             Print help
@@ -684,79 +634,15 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk config show ===
-Show configuration
+=== tk config set ===
+Set one setting: project, priority, labels, or clean-after
 
-Usage: tk config show
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config project ===
-Get or set the default project
-
-Usage: tk config project <SUBCOMMAND>
-
-Commands:
-  rename  Rename project and all its tasks
-  set     Set default project
-  show    Show default project
-  help    Print this message or the help of the given subcommand(s)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config project show ===
-Show default project
-
-Usage: tk config project show
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config project set ===
-Set default project
-
-Usage: tk config project set <NAME>
+Usage: tk config set <KEY> <VALUE>
 
 Arguments:
-  <NAME>  Project name to set
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config project rename ===
-Rename project and all its tasks
-
-Usage: tk config project rename <OLD> <NEW>
-
-Arguments:
-  <OLD>  Old project name
-  <NEW>  New project name
+  <KEY>    project | priority | labels | clean-after
+  <VALUE>  New value ("off" disables clean-after; an empty labels list clears
+           them)
 
 Flags:
   -h, --help             Print help
@@ -786,103 +672,14 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk config defaults ===
-Show or set default values
+=== tk config project ===
+Rename a project in every task that uses it
 
-Usage: tk config defaults <SUBCOMMAND>
-
-Commands:
-  assignees  Set default assignees
-  labels     Set default labels
-  priority   Set default priority
-  show       Show default values
-  help       Print this message or the help of the given subcommand(s)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config defaults show ===
-Show default values
-
-Usage: tk config defaults show
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config defaults priority ===
-Set default priority
-
-Usage: tk config defaults priority <LEVEL>
-
-Arguments:
-  <LEVEL>  Default priority level (0-4)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config defaults labels ===
-Set default labels
-
-Usage: tk config defaults labels [LABELS]…
-
-Arguments:
-  [LABELS]…  Default labels (comma-separated)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config defaults assignees ===
-Set default assignees
-
-Usage: tk config defaults assignees [ASSIGNEES]…
-
-Arguments:
-  [ASSIGNEES]…  Default assignees (comma-separated)
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config clean-after ===
-Configure auto-cleanup
-
-Usage: tk config clean-after <SUBCOMMAND>
+Usage: tk config project <SUBCOMMAND>
 
 Commands:
-  days     Set clean-after days
-  disable  Disable auto-clean
-  enable   Enable auto-clean
-  show     Show clean-after config
-  help     Print this message or the help of the given subcommand(s)
+  rename  Rename a project in every task that uses it
+  help    Print this message or the help of the given subcommand(s)
 
 Flags:
   -h, --help             Print help
@@ -893,55 +690,17 @@ Global flags:
       --tasks-dir <DIR>  Task store directory: exact path, must already exist
                          (no discovery)
 
-=== tk config clean-after show ===
-Show clean-after config
+=== tk config project rename ===
+Rename a project in every task that uses it
 
-Usage: tk config clean-after show
+A project is a display field, so this changes one field per task and rewrites no
+references.
 
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config clean-after enable ===
-Enable auto-clean
-
-Usage: tk config clean-after enable
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config clean-after disable ===
-Disable auto-clean
-
-Usage: tk config clean-after disable
-
-Flags:
-  -h, --help             Print help
-
-Global flags:
-  -j, --json             Output as JSON
-  -C, --dir <DIR>        Run in a different directory
-      --tasks-dir <DIR>  Task store directory: exact path, must already exist
-                         (no discovery)
-
-=== tk config clean-after days ===
-Set clean-after days
-
-Usage: tk config clean-after days <DAYS>
+Usage: tk config project rename <OLD> <NEW>
 
 Arguments:
-  <DAYS>  Days after which to clean completed tasks
+  <OLD>  Current project name
+  <NEW>  New project name
 
 Flags:
   -h, --help             Print help

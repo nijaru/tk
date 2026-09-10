@@ -53,11 +53,7 @@ pub struct InputError {
     pub code: &'static str,
 }
 
-impl miette::Diagnostic for InputError {
-    fn code(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
-        Some(Box::new(self.code))
-    }
-}
+impl miette::Diagnostic for InputError {}
 
 /// Build an "your input is wrong" report.
 pub fn invalid(message: impl Into<String>) -> miette::Report {

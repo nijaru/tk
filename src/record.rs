@@ -38,18 +38,11 @@ pub mod op {
     pub const DESCRIPTION: &str = "description";
     pub const PRIORITY: &str = "priority";
     pub const STATUS: &str = "status";
-    pub const DUE_DATE: &str = "due_date";
-    pub const ESTIMATE: &str = "estimate";
     pub const CHECKPOINT: &str = "checkpoint";
-    pub const ASSIGNEE: &str = "assignee";
-    pub const ATTEMPT: &str = "attempt";
     pub const LOG: &str = "log";
     pub const LABELS_ADD: &str = "labels.add";
     pub const LABELS_REMOVE: &str = "labels.remove";
     pub const LABELS_SET: &str = "labels.set";
-    pub const ASSIGNEES_ADD: &str = "assignees.add";
-    pub const ASSIGNEES_REMOVE: &str = "assignees.remove";
-    pub const ASSIGNEES_SET: &str = "assignees.set";
     pub const LINKS_ADD: &str = "links.add";
     pub const LINKS_REMOVE: &str = "links.remove";
     pub const LINKS_SET: &str = "links.set";
@@ -61,8 +54,6 @@ pub mod op {
     pub const EVIDENCE_SET: &str = "evidence.set";
     pub const BLOCK_ADD: &str = "block.add";
     pub const BLOCK_REMOVE: &str = "block.remove";
-    pub const RELATED_ADD: &str = "related.add";
-    pub const RELATED_REMOVE: &str = "related.remove";
     pub const PARENT_SET: &str = "parent.set";
     pub const PARENT_CLEAR: &str = "parent.clear";
     pub const ARCHIVED: &str = "archived";
@@ -351,13 +342,9 @@ fn apply(state: &mut Option<TaskState>, event: &Event) -> Result<()> {
             // the caller, so it cannot disagree with the status.
             s.completed_at = (status == Status::Done).then(|| event.ts.clone());
         }
-        op::DUE_DATE => s.due_date = optional_text(&event.data)?,
-        op::ESTIMATE => s.estimate = value(&event.data)?,
         op::CHECKPOINT => {
             s.checkpoint = optional_text(&event.data)?.filter(|t| !t.trim().is_empty())
         }
-        op::ASSIGNEE => s.assignee = optional_text(&event.data)?,
-        op::ATTEMPT => s.attempt = value(&event.data)?,
         op::LOG => {
             let entry: LogEntry = value(&event.data)?;
             s.logs.push(LogEntry {
@@ -372,9 +359,6 @@ fn apply(state: &mut Option<TaskState>, event: &Event) -> Result<()> {
         op::LABELS_ADD => add_all(&mut s.labels, &event.data)?,
         op::LABELS_REMOVE => remove_all(&mut s.labels, &event.data)?,
         op::LABELS_SET => s.labels = text_list(&event.data)?,
-        op::ASSIGNEES_ADD => add_all(&mut s.assignees, &event.data)?,
-        op::ASSIGNEES_REMOVE => remove_all(&mut s.assignees, &event.data)?,
-        op::ASSIGNEES_SET => s.assignees = text_list(&event.data)?,
         op::LINKS_ADD => add_all(&mut s.links, &event.data)?,
         op::LINKS_REMOVE => remove_all(&mut s.links, &event.data)?,
         op::LINKS_SET => s.links = text_list(&event.data)?,
@@ -386,8 +370,6 @@ fn apply(state: &mut Option<TaskState>, event: &Event) -> Result<()> {
         op::EVIDENCE_SET => s.evidence = text_list(&event.data)?,
         op::BLOCK_ADD => add_all(&mut s.blocked_by, &event.data)?,
         op::BLOCK_REMOVE => remove_all(&mut s.blocked_by, &event.data)?,
-        op::RELATED_ADD => add_all(&mut s.related, &event.data)?,
-        op::RELATED_REMOVE => remove_all(&mut s.related, &event.data)?,
         op::PARENT_SET => s.parent = Some(text(&event.data)?),
         op::PARENT_CLEAR => s.parent = None,
         op::ARCHIVED => s.archived_at = Some(event.ts.clone()),
@@ -458,14 +440,8 @@ mod tests {
                 status: Status::Open,
                 priority: Priority::Medium,
                 labels: Vec::new(),
-                assignees: Vec::new(),
-                assignee: None,
-                attempt: 0,
                 parent: None,
                 blocked_by: Vec::new(),
-                related: Vec::new(),
-                estimate: None,
-                due_date: None,
                 logs: Vec::new(),
                 created_at: "2026-01-01T00:00:00Z".to_owned(),
                 updated_at: "2026-01-01T00:00:00Z".to_owned(),
@@ -542,21 +518,6 @@ mod tests {
         ];
         let s = fold(&events).unwrap();
         assert_eq!(s.title, "survived");
-    }
-
-    #[test]
-    fn related_edges_fold_like_other_lists() {
-        let events = vec![
-            created(),
-            at(op::RELATED_ADD, json!(["01m25qbfqa26kxz59mxg4va3mq"]), "T1"),
-            at(op::RELATED_ADD, json!(["01m25qbfqa26kxz59mxg4va3mq"]), "T2"),
-            at(
-                op::RELATED_REMOVE,
-                json!(["01m25qbfqa26kxz59mxg4va3mq"]),
-                "T3",
-            ),
-        ];
-        assert!(fold(&events).unwrap().related.is_empty());
     }
 
     #[test]

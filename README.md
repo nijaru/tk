@@ -10,6 +10,11 @@ records in `.tasks/`, no daemon and no database.
 - Appends need no lock; the store lock covers only the operations that must see
   a consistent store.
 
+Deliberately out of scope: due dates, estimates, assignment, and claims. tk
+records what a task is and what was done about it; scheduling and ownership
+belong to whatever is coordinating the work. Priority and status are the only
+ordering signals, and `blocked_by` is the only constraint.
+
 ## Install
 
 ```bash
@@ -74,8 +79,6 @@ x9k2 | p2   | open         | Write tests
 | `tk log <ref> <msg>`        | Append a log entry                         |
 | `tk block <ref> <blocker>`  | Add a blocking dependency                  |
 | `tk unblock <ref> <blocker>` | Remove a blocking dependency              |
-| `tk relate <ref> <other>`   | Record a non-blocking relationship         |
-| `tk unrelate <ref> <other>` | Remove a non-blocking relationship         |
 | `tk archive <ref>`          | Retire a done/closed task without deleting it |
 | `tk unarchive <ref>`        | Return an archived task to active views    |
 | `tk purge <ref>` / `tk rm`  | Delete a record (refuses while referenced) |
@@ -98,16 +101,12 @@ tk add Title -p 2                  # Priority (0-4, p0-p4, or none/urgent/…)
 tk add Title -P api                # Project (display grouping)
 tk add Title -d "Description"
 tk add Title -l bug,urgent         # Labels (CSV)
-tk add Title -A nick,alice         # Assignees (CSV)
 tk add Title --parent a7b3         # Parent task
-tk add Title --estimate 3
-tk add Title --due 2026-01-15      # or +7d / +2w / +1m
 
 tk edit a7b3 -t "New title"
 tk edit a7b3 -l +urgent            # add a label
 tk edit a7b3 --remove-label bug
-tk edit a7b3 --due -               # clear
-tk edit a7b3 --parent -
+tk edit a7b3 --parent -            # clear the parent
 ```
 
 ## List Options
@@ -119,10 +118,8 @@ tk list -s done                # filter by status
 tk list -p 1                   # filter by priority
 tk list -P api                 # filter by project
 tk list -l bug                 # filter by label
-tk list --assignee nick
 tk list --parent a7b3
 tk list --roots
-tk list --overdue
 tk list -n 10                  # limit (default 20)
 tk list --archived             # archived only
 ```
@@ -131,14 +128,13 @@ tk list --archived             # archived only
 
 A task's ID is a ULID and its alias is assigned once; neither ever changes.
 `project` is a display field, so `tk mv` and `tk config project rename` change
-one field and rewrite no references. `blocked_by`, `parent`, and `related` hold
-task IDs and are rendered as aliases in human output.
+one field and rewrite no references. `blocked_by` and `parent` hold task IDs
+and render as aliases in human output.
 
 ## Checkpoints, Links, and Evidence
 
 ```bash
 tk checkpoint a7b3 "Parity passes; blocked on docs. Next: write the guide."
-tk checkpoint a7b3                       # print the current checkpoint
 tk checkpoint a7b3 --clear
 tk link a7b3 agent-context/projects/x/research/y.md src/store.rs:120
 tk accept a7b3 "parity test passes" "docs updated"
@@ -146,8 +142,8 @@ tk evidence a7b3 "cargo test --all-targets"
 ```
 
 The checkpoint is one replaceable summary — current result, blocker, next
-action, verification — while the log stays history. `links` holds documents; use
-`tk relate` for another task.
+action, verification — while the log stays history, and `links` holds documents.
+These commands write; `tk show` is the one place that reads them.
 
 ## Archives and Deletion
 
@@ -188,8 +184,9 @@ echo '{"intents":[
 ```
 
 Intents are `add`, `checkpoint`, `status`, `log`, `edit`, `block`, `unblock`,
-`relate`, `unrelate`, `link`, `unlink`, `accept`, `evidence`, `archive`,
-`unarchive`, `mv`, and `purge`; unknown fields are rejected. `--dry-run` reports
+`link`, `unlink`, `accept`, `evidence`, `archive`, `unarchive`, `mv`, and
+`purge`; unknown fields are rejected. Each intent runs the same operation as the
+matching command. `--dry-run` reports
 the plan without writing. It is not a cross-record transaction — an I/O failure
 partway through reports how many intents had landed.
 
@@ -261,12 +258,13 @@ notice.
 ## Config
 
 ```bash
-tk config                                  # show all config
-tk config project set api                  # default project
-tk config project rename old new           # rewrite every task's project field
-tk config alias web src/web                # directory alias for -C
-tk config defaults priority 2
-tk config clean-after days 30
+tk config                         # show everything
+tk config set project api         # default project for new tasks
+tk config set priority 1
+tk config set labels docs,cli
+tk config set clean-after 30      # or "off"
+tk config alias web src/web       # directory alias for -C
+tk config project rename old new  # rewrite every task's project field
 ```
 
 ## Shell Completions

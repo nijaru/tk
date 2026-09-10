@@ -1,15 +1,11 @@
 //! `tk add`
-//!
-//! Creation takes the store lock: alias uniqueness is store-wide, and two
-//! concurrent adds must not be able to pick the same one. `add` never creates a
-//! store — `tk init` is the only command that does.
 
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Priority;
+use crate::ops::{self, Mutation};
 use crate::store::CreateOptions;
-use crate::timeutil;
 
 /// Create a task
 #[derive(Args)]
@@ -29,18 +25,9 @@ pub struct Add {
     /// Labels (comma-separated, repeatable)
     #[usage(short = 'l', long, delimiter = ',')]
     pub labels: Vec<String>,
-    /// Assignees (comma-separated, repeatable)
-    #[usage(short = 'A', long, delimiter = ',')]
-    pub assignees: Vec<String>,
     /// Parent task (alias, ID, or ID prefix)
     #[usage(long)]
     pub parent: Option<String>,
-    /// Estimate (user-defined units)
-    #[usage(long)]
-    pub estimate: Option<i64>,
-    /// Due date (YYYY-MM-DD or relative +Nh/+Nd/+Nw/+Nm)
-    #[usage(long)]
-    pub due: Option<String>,
 }
 
 impl RunWith<AppCtx> for Add {
@@ -48,33 +35,22 @@ impl RunWith<AppCtx> for Add {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let priority = self.priority.map(|p| Priority::parse(&p)).transpose()?;
-        let due_date = self
-            .due
-            .map(|d| timeutil::parse_due_date(&d))
-            .transpose()?
-            .flatten();
-
-        // Resolution, parent validation, and the write share one transaction,
-        // so a concurrent purge cannot invalidate the parent it checked.
+        // Creation takes the store lock: alias uniqueness is store-wide, and
+        // parent validation must not race a concurrent delete.
         ctx.require_store()?;
-        let txn = ctx.store.txn()?;
-        let parent = self.parent.map(|p| txn.resolve(&p)).transpose()?;
-
-        let labels = (!self.labels.is_empty()).then_some(self.labels);
-        let assignees = (!self.assignees.is_empty()).then_some(self.assignees);
-
-        let t = txn.create(CreateOptions {
-            title: self.title.join(" "),
-            description: self.desc,
-            priority,
-            project: self.project,
-            labels,
-            assignees,
-            parent,
-            estimate: self.estimate,
-            due_date,
-        })?;
-
+        let m = Mutation::locked(&ctx.store)?;
+        let parent = self.parent.map(|p| m.store().resolve(&p)).transpose()?;
+        let t = ops::create(
+            &m,
+            CreateOptions {
+                title: self.title.join(" "),
+                description: self.desc,
+                priority,
+                project: self.project,
+                labels: (!self.labels.is_empty()).then_some(self.labels),
+                parent,
+            },
+        )?;
         let human = format!("Created task {} ({})", t.task.alias, t.task.id);
         ctx.emit("add", &t, Some(t.rev.clone()), Vec::new(), || human);
         Ok(())

@@ -9,16 +9,14 @@ use usage::{Args, RunWith};
 use crate::cli::AppCtx;
 use crate::format;
 use crate::ids;
+use crate::ops::{self, Mutation};
 use crate::output::code;
-use crate::record::op;
 use crate::store::{self, StoreLock};
-
-use super::Writer;
 
 /// Delete a task record
 ///
-/// Refuses while other tasks still reference it: those references would become
-/// dangling, and a broken graph is worse than a stale record.
+/// Refuses while other tasks still block on it or name it as a parent: those
+/// references would dangle, and a broken graph is worse than a stale record.
 #[derive(Args)]
 pub struct Purge {
     /// Task alias, ID, or ID prefix
@@ -38,11 +36,9 @@ impl RunWith<AppCtx> for Purge {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ctx.require_store()?;
-        let txn = ctx.store.txn()?;
-        let id = txn.resolve(&self.id)?;
-        txn.check_rev(&id, self.if_rev.as_deref())?;
-        let record = txn.load(&id)?;
+        let m = Mutation::locked(&ctx.store)?;
+        let id = m.store().resolve(&self.id)?;
+        let record = m.load(&id)?;
 
         if !self.force {
             // Never delete unattended: a script or agent that forgets -f gets an
@@ -72,7 +68,7 @@ impl RunWith<AppCtx> for Purge {
             }
         }
 
-        let out = txn.purge(&id, self.scrub)?;
+        let out = ops::purge(&m, &id, self.scrub, self.if_rev.as_deref())?;
         let data = serde_json::json!({
             "deleted": out.deleted,
             "references_scrubbed": out.references_scrubbed,
@@ -147,7 +143,8 @@ impl RunWith<AppCtx> for Init {
 /// Move a task to a different project
 ///
 /// Identity is unaffected: a move changes one display field, and no reference
-/// anywhere needs rewriting.
+/// anywhere needs rewriting. To rename a project for every task in it, use
+/// `tk config project rename`.
 #[derive(Args)]
 pub struct Mv {
     /// Task alias, ID, or ID prefix
@@ -160,19 +157,16 @@ impl RunWith<AppCtx> for Mv {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ids::validate_project(&self.project)?;
-        let writer = Writer::new(&ctx, false)?;
-        let id = writer.store().resolve(&self.source)?;
-        let record = writer.load(&id)?;
+        let m = Mutation::free(&ctx.store)?;
+        let id = m.store().resolve(&self.source)?;
+        let record = m.load(&id)?;
         if record.state.project == self.project {
-            return Err(miette::miette!(
+            return Err(crate::output::invalid(format!(
                 "{} is already in project {:?}",
-                record.state.alias,
-                self.project
-            ));
+                record.state.alias, self.project
+            )));
         }
-        writer.append(&id, op::PROJECT, serde_json::json!(self.project), None)?;
-        let t = writer.view(&id)?;
+        let t = ops::set_project(&m, &id, &self.project)?;
         let human = format!(
             "Moved {} ({}) to project {}",
             t.task.alias, t.task.id, t.task.project
@@ -182,15 +176,12 @@ impl RunWith<AppCtx> for Mv {
     }
 }
 
-/// Remove old completed tasks
+/// Archive completed tasks older than a threshold
 #[derive(Args)]
 pub struct Clean {
-    /// Remove tasks completed more than N days ago
+    /// Age in days (default: the store's clean-after setting)
     #[usage(long = "older-than")]
     pub older_than: Option<i64>,
-    /// Force clean even if disabled in config
-    #[usage(long)]
-    pub force: bool,
     /// Delete the records instead of archiving them (scrubs references)
     #[usage(long)]
     pub purge: bool,
@@ -201,26 +192,22 @@ impl RunWith<AppCtx> for Clean {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let config = ctx.store.load_config()?;
-        let days = if let Some(n) = self.older_than {
-            if n < 0 {
+        let days = match self.older_than {
+            Some(n) if n < 0 => {
                 return Err(crate::output::invalid("--older-than must be non-negative"));
             }
-            n
-        } else if config.clean_after.enabled || self.force {
-            let d = config.clean_after.days;
-            if d <= 0 {
-                crate::model::Config::default().clean_after.days
-            } else {
-                d
+            Some(n) => n,
+            None if config.clean_after.enabled => config.clean_after.days.max(0),
+            None => {
+                ctx.emit("clean", &serde_json::Value::Null, None, Vec::new(), || {
+                    "Auto-clean is disabled. Use --older-than N or 'tk config set clean-after N'."
+                        .to_owned()
+                });
+                return Ok(());
             }
-        } else {
-            ctx.emit("clean", &serde_json::Value::Null, None, Vec::new(), || {
-                "Auto-clean is disabled. Use --older-than N or enable with 'tk config clean-after enable'.".to_owned()
-            });
-            return Ok(());
         };
-        let txn = ctx.store.txn()?;
-        let out = txn.clean(days, self.purge)?;
+        let m = Mutation::locked(&ctx.store)?;
+        let out = ops::clean(&m, days, self.purge)?;
         let data = serde_json::json!({
             "archived": out.archived,
             "purged": out.purged,
@@ -287,8 +274,8 @@ impl RunWith<AppCtx> for Check {
 
 /// Drop a record's torn last line, left behind by an interrupted write
 ///
-/// Only the incomplete final line is removed: it was never a complete event,
-/// so nothing that was appended is lost.
+/// Only the incomplete final line is removed: it was never a complete event, so
+/// nothing that was appended is lost.
 #[derive(Args)]
 pub struct Recover {
     /// Task alias, ID, or ID prefix (default: every record)
@@ -302,10 +289,9 @@ impl RunWith<AppCtx> for Recover {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ctx.require_store()?;
-        let txn = ctx.store.txn()?;
-        let id = self.id.map(|input| txn.resolve(&input)).transpose()?;
-        let out = txn.recover(id.as_deref(), self.dry_run)?;
+        let m = Mutation::locked(&ctx.store)?;
+        let id = self.id.map(|input| m.store().resolve(&input)).transpose()?;
+        let out = ops::recover(&m, id.as_deref(), self.dry_run)?;
         let data = serde_json::json!({
             "repaired": out.repaired,
             "bytes_dropped": out.bytes_dropped,
@@ -395,10 +381,10 @@ impl RunWith<AppCtx> for Lock {
             stores.sort_by(|a, b| a.tasks_dir.cmp(&b.tasks_dir));
             stores.dedup_by(|a, b| a.tasks_dir == b.tasks_dir);
             if stores.is_empty() {
-                return Err(miette::miette!(
+                return Err(crate::output::invalid(format!(
                     "no task stores found under {}",
                     self.scan.join(", ")
-                ));
+                )));
             }
             stores
         };

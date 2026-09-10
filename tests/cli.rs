@@ -767,88 +767,6 @@ fn moving_a_task_keeps_its_identity_and_references() {
     assert_eq!(show_json(dir.path(), &blocker)["project"], "third");
 }
 
-// --- Related edges: task-to-task, not documents -----------------------------
-
-#[test]
-fn relate_records_a_non_blocking_edge() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (a_alias, a) = add_task(dir.path(), "alpha");
-    let (b_alias, b) = add_task(dir.path(), "beta");
-
-    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
-    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([b]));
-
-    // A relation is "see also", not a constraint: both stay ready.
-    let ready = ok_in(dir.path(), &["ready"]);
-    assert!(
-        ready.contains(&a_alias) && ready.contains(&b_alias),
-        "{ready}"
-    );
-
-    // Human output names the relation by alias.
-    let detail = ok_in(dir.path(), &["show", &a_alias]);
-    assert!(
-        detail.contains(&format!("Related:     {b_alias}")),
-        "{detail}"
-    );
-
-    // It is one-way: nothing was written to the other record.
-    assert_eq!(show_json(dir.path(), &b)["related"], serde_json::json!([]));
-
-    // Adding it twice does not duplicate it.
-    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
-    assert_eq!(
-        show_json(dir.path(), &a)["related"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
-    ok_in(dir.path(), &["unrelate", &a_alias, &b_alias]);
-    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([]));
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn purge_refuses_while_a_relation_points_at_the_record() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (a_alias, a) = add_task(dir.path(), "alpha");
-    let (b_alias, b) = add_task(dir.path(), "beta");
-    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
-
-    let out = run_in(dir.path(), &["purge", &b_alias, "-f"]);
-    assert!(!out.status.success(), "a relation must hold the record");
-    assert!(record_path(dir.path(), &b).exists());
-
-    ok_in(dir.path(), &["purge", &b_alias, "-f", "--scrub"]);
-    assert_eq!(show_json(dir.path(), &a)["related"], serde_json::json!([]));
-    ok_in(dir.path(), &["check"]);
-}
-
-#[test]
-fn a_relation_to_a_missing_task_is_reported() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    ok_in(dir.path(), &["init", "-P", "demo"]);
-    let (a_alias, _) = add_task(dir.path(), "alpha");
-    let (b_alias, b) = add_task(dir.path(), "beta");
-    ok_in(dir.path(), &["relate", &a_alias, &b_alias]);
-
-    std::fs::remove_file(record_path(dir.path(), &b)).expect("remove related");
-    let out = run_in(dir.path(), &["check"]);
-    assert!(
-        !out.status.success(),
-        "a dangling relation must be reported"
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("related to missing task"),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-}
-
 // --- Stale intent -----------------------------------------------------------
 
 #[test]
@@ -979,12 +897,7 @@ fn missing_explicit_store_fails_instead_of_creating() {
 fn explicit_missing_store_fails_on_reads_too() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = dir.path().join("absent").join(".tasks");
-    for args in [
-        vec!["list"],
-        vec!["ready"],
-        vec!["config", "show"],
-        vec!["check"],
-    ] {
+    for args in [vec!["list"], vec!["ready"], vec!["config"], vec!["check"]] {
         let out = bin()
             .arg("--tasks-dir")
             .arg(&store)
@@ -1071,8 +984,11 @@ fn checkpoint_is_replaced_not_appended() {
     assert_eq!(shown["checkpoint"], "second pass: blocked on review");
     assert_eq!(shown["logs"].as_array().expect("logs").len(), 1);
 
-    let out = ok_in(dir.path(), &["checkpoint", &alias]);
+    // Reading it is `show`'s job: the write command requires input.
+    let out = ok_in(dir.path(), &["show", &alias]);
     assert!(out.contains("second pass: blocked on review"), "{out}");
+    let missing = run_in(dir.path(), &["checkpoint", &alias]);
+    assert!(!missing.status.success(), "a write with no text must fail");
 
     ok_in(dir.path(), &["checkpoint", &alias, "--clear"]);
     assert_eq!(
@@ -1205,7 +1121,7 @@ fn every_command_answers_in_the_same_envelope() {
         ("evidence", vec!["evidence", &alias, "cargo test"]),
         ("check", vec!["check"]),
         ("path", vec!["path"]),
-        ("config", vec!["config", "show"]),
+        ("config", vec!["config"]),
     ] {
         let args = args.iter().map(|a| a.as_ref()).collect::<Vec<&str>>();
         let value = envelope(dir.path(), &args);
@@ -1213,12 +1129,13 @@ fn every_command_answers_in_the_same_envelope() {
         assert_eq!(value["ok"], serde_json::json!(true), "tk {args:?}: {value}");
     }
 
-    // A relation to itself is rejected — and the failure is still an envelope.
-    let out = run_in(dir.path(), &["relate", &alias, &alias, "--json"]);
+    // A bad setting is rejected — and the failure is still an envelope.
+    let out = run_in(dir.path(), &["config", "set", "nonsense", "x", "--json"]);
     assert!(!out.status.success());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
-    assert_envelope_shape(&value, "relate");
+    assert_envelope_shape(&value, "config");
     assert_eq!(value["ok"], serde_json::json!(false));
+    assert_eq!(value["error_code"], "invalid_input");
 }
 
 #[test]
@@ -1460,6 +1377,144 @@ fn apply_honours_a_stale_revision() {
         show_json(dir.path(), &id)["checkpoint"],
         serde_json::Value::Null
     );
+}
+
+// --- The CLI and apply must agree -------------------------------------------
+
+/// The same change, made two ways, must produce the same task.
+///
+/// `tk apply` used to be a second implementation of every command; this is the
+/// test that would have caught the divergence (it caught one during the
+/// rewrite), so it stays.
+#[test]
+fn cli_and_apply_produce_the_same_task() {
+    let via_cli = tempfile::tempdir().expect("tempdir");
+    let via_batch = tempfile::tempdir().expect("tempdir");
+    init_project(&via_cli, "demo");
+    init_project(&via_batch, "demo");
+
+    let (a1, id1) = add_task(via_cli.path(), "alpha");
+    let (b1, _) = add_task(via_cli.path(), "beta");
+    let (a2, id2) = add_task(via_batch.path(), "alpha");
+    let (b2, _) = add_task(via_batch.path(), "beta");
+
+    // One way: a sequence of commands.
+    ok_in(
+        via_cli.path(),
+        &["edit", &a1, "-t", "renamed", "-l", "+x,+y", "-p", "1"],
+    );
+    ok_in(via_cli.path(), &["checkpoint", &a1, "halfway"]);
+    ok_in(via_cli.path(), &["accept", &a1, "acc-one", "acc-two"]);
+    ok_in(via_cli.path(), &["evidence", &a1, "cargo test"]);
+    ok_in(via_cli.path(), &["link", &a1, "docs/x.md"]);
+    ok_in(via_cli.path(), &["log", &a1, "a note"]);
+    ok_in(via_cli.path(), &["block", &a1, &b1]);
+    ok_in(via_cli.path(), &["start", &a1]);
+
+    // The other: one batch of intents, same order.
+    let body = serde_json::json!({"intents": [
+        {"op": "edit", "id": a2, "title": "renamed", "priority": 1, "labels": ["+x", "+y"]},
+        {"op": "checkpoint", "id": a2, "text": "halfway"},
+        {"op": "accept", "id": a2, "values": ["acc-one", "acc-two"]},
+        {"op": "evidence", "id": a2, "values": ["cargo test"]},
+        {"op": "link", "id": a2, "values": ["docs/x.md"]},
+        {"op": "log", "id": a2, "msg": "a note"},
+        {"op": "block", "id": a2, "blocker": b2},
+        {"op": "status", "id": a2, "status": "active"},
+    ]})
+    .to_string();
+    let value = apply_ok(via_batch.path(), &body);
+    assert_eq!(value["data"]["applied"].as_array().unwrap().len(), 8);
+
+    let one = show_json(via_cli.path(), &id1);
+    let two = show_json(via_batch.path(), &id2);
+
+    for field in [
+        "title",
+        "priority",
+        "status",
+        "labels",
+        "checkpoint",
+        "acceptance",
+        "evidence",
+        "links",
+    ] {
+        assert_eq!(one[field], two[field], "field {field} diverged");
+    }
+    // Identity differs between the two stores (independent ULIDs and aliases),
+    // so the graph is compared through each store's own handle for beta.
+    assert_eq!(one["blocked_by"].as_array().map(Vec::len), Some(1));
+    assert_eq!(one["blocker_refs"], serde_json::json!([b1]));
+    assert_eq!(two["blocker_refs"], serde_json::json!([b2]));
+    let messages = |v: &serde_json::Value| -> Vec<String> {
+        v["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["msg"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(messages(&one), messages(&two));
+    assert_eq!(messages(&one), vec!["a note"]);
+
+    // And the batch path leaves a store the checker is happy with.
+    ok_in(via_batch.path(), &["check"]);
+    ok_in(via_cli.path(), &["check"]);
+}
+
+// --- Configuration -----------------------------------------------------------
+
+#[test]
+fn config_set_changes_one_setting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_project(&dir, "demo");
+
+    let setting = |key: &str, value: &str| -> serde_json::Value {
+        payload(dir.path(), &["config", "set", key, value])
+    };
+
+    assert_eq!(setting("project", "other")["project"], "other");
+    assert_eq!(setting("priority", "1")["priority"], serde_json::json!(1));
+    assert_eq!(
+        setting("priority", "high")["priority"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        setting("labels", "a,b")["labels"],
+        serde_json::json!(["a", "b"])
+    );
+    assert_eq!(setting("labels", "")["labels"], serde_json::json!([]));
+
+    let off = setting("clean-after", "off");
+    assert_eq!(off["clean_after"]["enabled"], serde_json::json!(false));
+    let days = setting("clean-after", "30");
+    assert_eq!(days["clean_after"]["enabled"], serde_json::json!(true));
+    assert_eq!(days["clean_after"]["days"], serde_json::json!(30));
+
+    // The settings are one command's worth of surface, so the whole file is
+    // readable in one place and carries the defaults a new task inherits.
+    let config = payload(dir.path(), &["config"]);
+    assert_eq!(config["project"], "other");
+    assert_eq!(config["defaults"]["priority"], serde_json::json!(2));
+    let (new_alias, new_id) = add_task(dir.path(), "inherits defaults");
+    assert_eq!(new_alias.len(), 4);
+    assert_eq!(show_json(dir.path(), &new_id)["project"], "other");
+    assert_eq!(
+        show_json(dir.path(), &new_id)["priority"],
+        serde_json::json!(2)
+    );
+
+    // Unknown keys and bad values are rejected with a code, not ignored.
+    for (key, value) in [
+        ("nonsense", "x"),
+        ("priority", "9"),
+        ("clean-after", "later"),
+    ] {
+        let out = run_in(dir.path(), &["config", "set", key, value, "--json"]);
+        assert!(!out.status.success(), "config set {key} {value} must fail");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("envelope");
+        assert_eq!(value["error_code"], "invalid_input", "{value}");
+    }
 }
 
 // --- Lock guard for external sync -------------------------------------------
