@@ -290,10 +290,6 @@ impl TaskState {
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
     }
-
-    pub fn is_done(&self) -> bool {
-        self.status.is_terminal()
-    }
 }
 
 /// Task state plus computed view fields (what `--json` emits).
@@ -319,12 +315,6 @@ pub struct TaskView {
     pub parent_ref: Option<String>,
 }
 
-impl TaskView {
-    pub fn id(&self) -> &str {
-        &self.task.id
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Config (`store.json`)
 // ---------------------------------------------------------------------------
@@ -338,8 +328,6 @@ pub struct ConfigDefaults {
     pub priority: Priority,
     #[serde(default, deserialize_with = "null_vec")]
     pub labels: Vec<String>,
-    #[serde(default, deserialize_with = "null_vec")]
-    pub assignees: Vec<String>,
 }
 
 fn default_priority() -> Priority {
@@ -351,7 +339,6 @@ impl Default for ConfigDefaults {
         Self {
             priority: Priority::Medium,
             labels: Vec::new(),
-            assignees: Vec::new(),
         }
     }
 }

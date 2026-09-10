@@ -10,7 +10,7 @@ runtime.
 Usage: tk [FLAGS] <SUBCOMMAND>
 
 Commands:
-  accept      Add or show acceptance criteria
+  accept      Add or change what must be true for this task to be done
   add         Create a task
   apply       Apply a batch of intents from stdin under one lock
   archive     Archive a done/closed task without deleting it
@@ -18,15 +18,15 @@ Commands:
   check       Check store integrity (non-zero exit on findings)
   checkpoint  Replace the current checkpoint (one summary, not the log)
               [aliases: ck]
-  clean       Remove old completed tasks (archives by default)
+  clean       Archive completed tasks older than a threshold
   close       Close/cancel a task
   config      Show or set configuration
   defer       Defer a task
   done        Complete a task
   edit        Edit a task
-  evidence    Add or show completion evidence
+  evidence    Add or change how completion was verified
   init        Initialize .tasks/ in the current directory
-  link        Add links to research, decisions, or source locations
+  link        Add document links (paths or URLs) to a task
   list        List tasks [aliases: ls]
   lock        Run a command while holding the store mutation lock
   log         Add a log entry to a task
@@ -37,7 +37,8 @@ Commands:
   ready       List active/open unblocked tasks [aliases: rdy]
   recover     Drop a record's torn last line (from an interrupted write)
   show        Show task details
-  start       Start working on a task (open → active) [aliases: active]
+  start       Mark a task as being worked on (open → active; not a claim)
+              [aliases: active]
   unarchive   Return an archived task to active views
   unblock     Remove a blocker dependency
   unlink      Remove links from a task
@@ -148,7 +149,7 @@ Global flags:
                          (no discovery)
 
 === tk start ===
-Start working on a task (open → active)
+Mark a task as being worked on (open → active; not a claim)
 
 Usage: tk start <ID>
 
@@ -323,7 +324,7 @@ Global flags:
                          (no discovery)
 
 === tk accept ===
-Add or show acceptance criteria
+Add or change what must be true for this task to be done
 
 Usage: tk accept [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
@@ -343,7 +344,7 @@ Global flags:
                          (no discovery)
 
 === tk evidence ===
-Add or show completion evidence
+Add or change how completion was verified
 
 Usage: tk evidence [--remove <TEXT>] [--clear] <ID> [VALUES]…
 
@@ -543,7 +544,7 @@ Global flags:
                          (no discovery)
 
 === tk clean ===
-Remove old completed tasks (archives by default)
+Archive completed tasks older than a threshold
 
 Usage: tk clean [--older-than <OLDER_THAN>] [--purge]
 

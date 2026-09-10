@@ -16,7 +16,6 @@ pub mod code {
     pub const NOT_A_V1_STORE: &str = "not_a_v1_store";
     pub const STORE_NOT_FOUND: &str = "store_not_found";
     pub const INVALID_INPUT: &str = "invalid_input";
-    pub const TORN_RECORD: &str = "torn_record";
     pub const IO: &str = "io";
     pub const PARSE: &str = "parse";
     pub const CHECK_FAILED: &str = "check_failed";

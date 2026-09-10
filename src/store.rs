@@ -15,7 +15,7 @@
 //! Composite operations live only on `Txn`, so the lock cannot be forgotten by
 //! accident: there is no unlocked path to them.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -570,10 +570,6 @@ impl Snapshot {
     /// Alias and status for every record, so references render as handles.
     pub fn index(&self) -> Index {
         Index::from_records(&self.records)
-    }
-
-    pub fn by_id(&self) -> HashMap<&str, &Record> {
-        self.records.iter().map(|r| (r.id.as_str(), r)).collect()
     }
 }
 
@@ -1631,15 +1627,6 @@ pub fn find_stores(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
-}
-
-/// Sorted, de-duplicated set of values, for deterministic output.
-pub fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
-    values
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 #[cfg(test)]

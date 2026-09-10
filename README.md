@@ -311,6 +311,10 @@ current state is a fold over the lines, and `created` carries the full initial
 state so a record is self-describing from its first line. Unknown operations
 are ignored, so a newer writer's events do not break an older reader.
 
+There is no index: `list` folds every record, which costs about 20ms for 161
+records and stays proportionate in the low thousands. Add one only with
+measurements that say it is needed.
+
 ## Environment
 
 - `NO_COLOR` — disable colored output

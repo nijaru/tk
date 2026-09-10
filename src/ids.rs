@@ -10,8 +10,6 @@
 //! more of the ULID to reach a record whose ID happens to start the same way.
 
 use std::fmt;
-use std::path::Path;
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -87,11 +85,6 @@ pub fn decode(value: &str) -> Option<u128> {
         out = (out << 5) | digit;
     }
     Some(out)
-}
-
-/// Creation time (ms since the Unix epoch) encoded in an ID.
-pub fn timestamp_ms(id: &str) -> Option<u64> {
-    Some((decode(id)? >> 80) as u64)
 }
 
 pub fn is_valid_id(s: &str) -> bool {
@@ -241,51 +234,20 @@ fn short_id(id: &str) -> String {
     id.chars().take(10).collect()
 }
 
-/// Reject a name that must never be used as a path component.
-pub fn is_safe_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
-}
-
-/// Look up one record's identity by ID, from an already-built index.
-pub fn known_by_id<'a>(known: &'a [Known], id: &str) -> Option<&'a Known> {
-    known.iter().find(|k| k.id == id)
-}
-
-/// Paths are always built from validated IDs; this keeps callers honest.
-pub fn record_file_name(id: &str) -> Option<String> {
-    is_valid_id(id).then(|| format!("{id}.jsonl"))
-}
-
 impl fmt::Display for Known {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.alias, self.id)
     }
 }
 
-/// Resolve within a records directory (convenience for callers without a store).
-pub fn resolve_in(records_dir: &Path, input: &str) -> Result<String, IdError> {
-    let mut known = Vec::new();
-    let entries =
-        std::fs::read_dir(records_dir).map_err(|_| IdError::NotFound(input.to_owned()))?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(id) = name.strip_suffix(".jsonl") else {
-            continue;
-        };
-        if is_valid_id(id) {
-            known.push(Known {
-                id: id.to_owned(),
-                alias: String::new(),
-                legacy_aliases: Vec::new(),
-            });
-        }
-    }
-    resolve(&known, input)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Creation time (ms since the Unix epoch) encoded in an ID.
+    fn timestamp_ms(id: &str) -> Option<u64> {
+        Some((decode(id)? >> 80) as u64)
+    }
 
     fn known(id: &str, alias: &str) -> Known {
         Known {
@@ -423,15 +385,5 @@ mod tests {
             resolve(&packed, "dup0"),
             Err(IdError::Ambiguous { .. })
         ));
-    }
-
-    #[test]
-    fn unsafe_names_rejected() {
-        for bad in ["", ".", "..", "a/b", "a\\b"] {
-            assert!(!is_safe_name(bad), "{bad}");
-        }
-        assert!(is_safe_name("demo-a7b3"));
-        assert!(record_file_name("nope").is_none());
-        assert!(record_file_name(&new_id()).is_some());
     }
 }

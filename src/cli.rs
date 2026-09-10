@@ -43,7 +43,7 @@ pub enum Commands {
     Ready(crate::commands::Ready),
     /// Show task details
     Show(crate::commands::Show),
-    /// Start working on a task (open → active)
+    /// Mark a task as being worked on (open → active; not a claim)
     #[usage(alias = "active")]
     Start(crate::commands::Start),
     /// Reset a task status to open
@@ -59,13 +59,13 @@ pub enum Commands {
     /// Replace the current checkpoint (one summary, not the log)
     #[usage(alias = "ck")]
     Checkpoint(crate::commands::Checkpoint),
-    /// Add links to research, decisions, or source locations
+    /// Add document links (paths or URLs) to a task
     Link(crate::commands::Link),
     /// Remove links from a task
     Unlink(crate::commands::Unlink),
-    /// Add or show acceptance criteria
+    /// Add or change what must be true for this task to be done
     Accept(crate::commands::Accept),
-    /// Add or show completion evidence
+    /// Add or change how completion was verified
     Evidence(crate::commands::Evidence),
     /// Archive a done/closed task without deleting it
     Archive(crate::commands::Archive),
@@ -86,7 +86,7 @@ pub enum Commands {
     Mv(crate::commands::Mv),
     /// Apply a batch of intents from stdin under one lock
     Apply(crate::commands::Apply),
-    /// Remove old completed tasks (archives by default)
+    /// Archive completed tasks older than a threshold
     Clean(crate::commands::Clean),
     /// Check store integrity (non-zero exit on findings)
     Check(crate::commands::Check),
