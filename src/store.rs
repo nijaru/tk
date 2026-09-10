@@ -387,6 +387,12 @@ impl Ctx {
         }
         let strays = self.unrecognized_json();
         if !strays.is_empty() {
+            // A v0 store may have no config.json at all — several real ones do
+            // not — so its task documents are the store. One peek tells them
+            // apart from a genuinely stray file and names the right migration.
+            if let Some(task) = strays.iter().find(|name| self.is_task_document(name)) {
+                return format!("found task documents from the v0 layout, starting with {task}");
+            }
             let mut shown: Vec<String> = strays.iter().take(3).cloned().collect();
             if strays.len() > 3 {
                 shown.push(format!("and {} more", strays.len() - 3));
@@ -397,6 +403,18 @@ impl Ctx {
             );
         }
         format!("{STORE_FILE} is missing")
+    }
+
+    /// True when a file in the store parses as a v0 task document: it has a
+    /// `ref` and a `title`, which is what every version of that layout wrote.
+    fn is_task_document(&self, name: &str) -> bool {
+        let Ok(data) = fs::read(self.tasks_dir.join(name)) else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
+            return false;
+        };
+        value.get("ref").is_some() && value.get("title").is_some()
     }
 
     /// `.json` files in the store that are not `.tk.json` and not entry names.
@@ -1388,6 +1406,23 @@ mod tests {
             Err(StoreError::NotStore { detail, .. }) => assert!(detail.contains("v0"), "{detail}"),
             other => panic!("expected refusal, got {other:?}"),
         }
+
+        // A v0 store that never had a config file: its task documents are the
+        // store, and the refusal must say so rather than calling them strays.
+        fs::remove_file(tasks.join("config.json")).unwrap();
+        fs::write(
+            tasks.join("tk-a7b3.json"),
+            r#"{"project":"tk","ref":"a7b3","title":"Alpha","status":"open"}"#,
+        )
+        .unwrap();
+        match ctx.check_format() {
+            Err(StoreError::NotStore { detail, .. }) => {
+                assert!(detail.contains("task documents"), "{detail}");
+                assert!(detail.contains("v0"), "{detail}");
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        fs::remove_file(tasks.join("tk-a7b3.json")).unwrap();
 
         // A wrong format number in our own file.
         fs::write(tasks.join(STORE_FILE), r#"{"format":9}"#).unwrap();

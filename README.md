@@ -270,7 +270,8 @@ tools/migrate_to_v3.py .tasks            # add --dry-run to plan only
 tk check                                 # expect no findings
 ```
 
-It handles both older layouts — v0 (`config.json` plus one document per task)
+It handles both older layouts — v0 (one document per task, with or without the
+old `config.json`)
 and v1 (`store.json` plus `records/<ulid>.jsonl` event logs, including the event
 fold) — reuses a legacy ref as the new ref when it is valid and free, remaps
 `blocked_by`, and writes `MIGRATION.md` mapping every old handle to its new ref.

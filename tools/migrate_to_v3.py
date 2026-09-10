@@ -405,17 +405,21 @@ def add_dropped(counter: Counter, fields: set[str], source: dict) -> None:
             counter[key] += 1
 
 
-def parse_v0(store: Path) -> tuple[list[Entry], list[Path], dict]:
-    config_path = store / "config.json"
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MigrationError(f"{config_path}: cannot read v0 config ({exc})")
-    if not isinstance(config, dict):
-        raise MigrationError(f"{config_path}: v0 config is not a JSON object")
+def parse_v0(store: Path, config_path: Path | None) -> tuple[list[Entry], list[Path], dict]:
+    """Read a v0 store. The config file is optional: several real stores were
+    written without one, and their task documents are the store."""
+    config: dict = {}
+    consumed: list[Path] = []
+    if config_path is not None:
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MigrationError(f"{config_path}: cannot read v0 config ({exc})")
+        if not isinstance(config, dict):
+            raise MigrationError(f"{config_path}: v0 config is not a JSON object")
+        consumed.append(config_path)
 
     entries: list[Entry] = []
-    consumed: list[Path] = [config_path]
     for path in sorted(store.glob("*.json")):
         if path.name.startswith(".") or path.name in ("config.json", "store.json"):
             continue
@@ -834,6 +838,28 @@ def print_summary(
 # --- entry point ------------------------------------------------------------
 
 
+def v0_documents(store: Path) -> list[Path]:
+    """Top-level documents that look like v0 tasks, whether or not a config
+    exists. A v3 entry name means this is a format-3 store missing its store
+    file, which must not be reinterpreted as v0."""
+    found: list[Path] = []
+    for path in sorted(store.glob("*.json")):
+        if path.name.startswith(".") or path.name in ("config.json", "store.json"):
+            continue
+        if ENTRY_NAME.match(path.name):
+            raise MigrationError(
+                f"{store} holds {path.name}, a format-3 entry name, but has no "
+                ".tk.json; restore that file instead of converting this store"
+            )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and "ref" in data and "title" in data:
+            found.append(path)
+    return found
+
+
 def run(store: Path, dry_run: bool) -> int:
     global _NOW
     _NOW = now_rfc3339()
@@ -846,12 +872,16 @@ def run(store: Path, dry_run: bool) -> int:
     if (store / "store.json").exists():
         entries, consumed, config = parse_v1(store)
         kind = "v1"
-    elif (store / "config.json").exists():
-        entries, consumed, config = parse_v0(store)
+    elif (store / "config.json").exists() or v0_documents(store):
+        config_path = store / "config.json"
+        entries, consumed, config = parse_v0(
+            store, config_path if config_path.exists() else None
+        )
         kind = "v0"
     else:
         raise MigrationError(
-            f"{store} is not a tk store: no store.json (v1) or config.json (v0)"
+            f"{store} is not a tk store: no store.json (v1), no config.json (v0), "
+            "and no task documents"
         )
 
     # Refuse if v3 entry files are already present. Source files that happen to
