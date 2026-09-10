@@ -1,4 +1,8 @@
 //! `tk edit`
+//!
+//! The read that label/assignee updates depend on happens inside the same
+//! transaction as the write, and `--if-rev` rejects a mutation prepared against
+//! a stale read.
 
 use miette::IntoDiagnostic;
 use usage::{Args, RunWith};
@@ -7,8 +11,6 @@ use crate::cli::AppCtx;
 use crate::model::Priority;
 use crate::store::{self, UpdateOptions};
 use crate::{format, timeutil};
-
-use super::resolve;
 
 /// Edit a task
 #[derive(Args)]
@@ -45,16 +47,21 @@ pub struct Edit {
     /// Estimate (or 0 to clear)
     #[usage(long)]
     pub estimate: Option<i64>,
+    /// Reject the edit unless the task still has this revision (`show --json`)
+    #[usage(long = "if-rev", value_name = "REV")]
+    pub if_rev: Option<String>,
 }
 
 impl RunWith<AppCtx> for Edit {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let id = resolve(&ctx, &self.id)?;
-        let (current, _) = store::get_task(&ctx.store, &id).into_diagnostic()?;
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let id = txn.resolve(&self.id).into_diagnostic()?;
+        let current = txn.load(&id).into_diagnostic()?;
         let mut u = UpdateOptions {
             title: self.title,
+            expect_rev: self.if_rev,
             ..Default::default()
         };
 
@@ -64,12 +71,12 @@ impl RunWith<AppCtx> for Edit {
         if !self.labels.is_empty() || !self.remove_labels.is_empty() {
             let mut ops = self.labels;
             ops.extend(self.remove_labels.iter().map(|l| format!("-{l}")));
-            u.labels = Some(apply_slice_updates(&current.task.labels, &ops));
+            u.labels = Some(apply_slice_updates(&current.labels, &ops));
         }
         if !self.assignees.is_empty() || !self.remove_assignees.is_empty() {
             let mut ops = self.assignees;
             ops.extend(self.remove_assignees.iter().map(|a| format!("-{a}")));
-            u.assignees = Some(apply_slice_updates(&current.task.assignees, &ops));
+            u.assignees = Some(apply_slice_updates(&current.assignees, &ops));
         }
         if let Some(d) = self.due {
             if d == "-" {
@@ -83,8 +90,8 @@ impl RunWith<AppCtx> for Edit {
             if p == "-" {
                 u.parent = Some(None);
             } else {
-                let pid = resolve(&ctx, &p)?;
-                store::validate_parent(&ctx.store, &pid, &id).into_diagnostic()?;
+                let pid = txn.resolve(&p).into_diagnostic()?;
+                store::validate_parent(txn.ctx(), &pid, &id).into_diagnostic()?;
                 u.parent = Some(Some(pid));
             }
         }
@@ -95,7 +102,7 @@ impl RunWith<AppCtx> for Edit {
             u.estimate = Some(if e == 0 { None } else { Some(e) });
         }
 
-        let updated = store::update_task(&ctx.store, &id, u).into_diagnostic()?;
+        let updated = txn.update(&id, u).into_diagnostic()?;
         if ctx.json {
             println!("{}", format::format_json(&updated));
         } else {

@@ -10,7 +10,6 @@ use crate::cli::AppCtx;
 use crate::format;
 use crate::ids;
 use crate::model::Priority;
-use crate::store;
 
 /// Show or set configuration
 #[derive(Args)]
@@ -122,8 +121,8 @@ impl RunWith<AppCtx> for ProjectSet {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         ids::validate_project(&self.name).into_diagnostic()?;
         let name = self.name.clone();
-        let config = ctx
-            .store
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let config = txn
             .update_config(|c| c.project = name.clone())
             .into_diagnostic()?;
         println!("Default project set to {:?}", config.project);
@@ -144,7 +143,8 @@ impl RunWith<AppCtx> for ProjectRename {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let res = store::rename_project(&ctx.store, &self.old, &self.new).into_diagnostic()?;
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let res = txn.rename_project(&self.old, &self.new).into_diagnostic()?;
         println!("Renamed project {:?} -> {:?}", self.old, self.new);
         println!("  Renamed {} tasks", res.renamed.len());
         println!("  Updated {} references", res.references_updated);
@@ -172,19 +172,19 @@ impl RunWith<AppCtx> for ConfigAlias {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         if let Some(name) = self.name.clone() {
             if self.rm {
-                ctx.store
-                    .update_config(|c| {
-                        if let Some(a) = c.aliases.as_mut() {
-                            a.remove(&name);
-                        }
-                    })
-                    .into_diagnostic()?;
+                let txn = ctx.store.txn().into_diagnostic()?;
+                txn.update_config(|c| {
+                    if let Some(a) = c.aliases.as_mut() {
+                        a.remove(&name);
+                    }
+                })
+                .into_diagnostic()?;
                 println!("Removed alias {name:?}");
                 return Ok(());
             }
             if let Some(path) = self.path.clone() {
-                let config = ctx
-                    .store
+                let txn = ctx.store.txn().into_diagnostic()?;
+                let config = txn
                     .update_config(|c| {
                         c.aliases
                             .get_or_insert_default()
@@ -273,8 +273,8 @@ impl RunWith<AppCtx> for DefaultsPriority {
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let p =
             Priority::from_u8(self.level).ok_or_else(|| miette::miette!("priority must be 0-4"))?;
-        ctx.store
-            .update_config(|c| c.defaults.priority = p)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.defaults.priority = p)
             .into_diagnostic()?;
         Ok(())
     }
@@ -293,8 +293,8 @@ impl RunWith<AppCtx> for DefaultsLabels {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let labels = self.labels.clone();
-        ctx.store
-            .update_config(|c| c.defaults.labels = labels)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.defaults.labels = labels)
             .into_diagnostic()?;
         Ok(())
     }
@@ -313,8 +313,8 @@ impl RunWith<AppCtx> for DefaultsAssignees {
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
         let assignees = self.assignees.clone();
-        ctx.store
-            .update_config(|c| c.defaults.assignees = assignees)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.defaults.assignees = assignees)
             .into_diagnostic()?;
         Ok(())
     }
@@ -380,8 +380,8 @@ impl RunWith<AppCtx> for CleanAfterEnable {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ctx.store
-            .update_config(|c| c.clean_after.enabled = true)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.clean_after.enabled = true)
             .into_diagnostic()?;
         Ok(())
     }
@@ -395,8 +395,8 @@ impl RunWith<AppCtx> for CleanAfterDisable {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        ctx.store
-            .update_config(|c| c.clean_after.enabled = false)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.clean_after.enabled = false)
             .into_diagnostic()?;
         Ok(())
     }
@@ -417,8 +417,8 @@ impl RunWith<AppCtx> for CleanAfterDays {
             return Err(miette::miette!("days must be >= 0"));
         }
         let days = self.days;
-        ctx.store
-            .update_config(|c| c.clean_after.days = days)
+        let txn = ctx.store.txn().into_diagnostic()?;
+        txn.update_config(|c| c.clean_after.days = days)
             .into_diagnostic()?;
         Ok(())
     }

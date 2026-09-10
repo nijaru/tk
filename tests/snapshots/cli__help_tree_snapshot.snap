@@ -1,18 +1,17 @@
 ---
 source: tests/cli.rs
-assertion_line: 13
 expression: tree
 ---
 === tk ===
 tk 0.2.0
-Minimal task tracker. Plain JSON in .tasks/ — no daemons, no conflicts.
+Minimal task tracker. Plain JSON in .tasks/ — no daemons, no runtime.
 
-Usage: tk [-j --json] [-C --dir <DIR>] <SUBCOMMAND>
+Usage: tk [FLAGS] <SUBCOMMAND>
 
 Commands:
   add      Create a task
   block    Add a blocker dependency
-  check    Check task integrity
+  check    Check task integrity (non-zero exit on findings)
   clean    Remove old completed tasks
   close    Close/cancel a task
   config   Show or set configuration
@@ -21,21 +20,26 @@ Commands:
   edit     Edit a task
   init     Initialize .tasks/ in the current directory
   list     List tasks [aliases: ls]
+  lock     Run a command while holding the store mutation lock
   log      Add a log entry to a task
   mv       Move a task to a different project
   open     Reset a task status to open
+  path     Print the resolved task store location
   ready    List active/open unblocked tasks [aliases: rdy]
   remove   Delete a task [aliases: rm]
+  repair   Repair recorded inconsistencies in a task file
   show     Show task details
   start    Start working on a task (open → active) [aliases: active]
   unblock  Remove a blocker dependency
   help     Print this message or the help of the given subcommand(s)
 
 Flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
-  -h, --help       Print help
-  -V, --version    Print version
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+  -h, --help             Print help
+  -V, --version          Print version
 
 === tk init ===
 Initialize .tasks/ in the current directory
@@ -49,6 +53,8 @@ Flags:
 Global flags:
   -j, --json               Output as JSON
   -C, --dir <DIR>          Run in a different directory
+      --tasks-dir <DIR>    Task store directory: exact path, must already exist
+                           (no discovery)
 
 === tk add ===
 Create a task
@@ -73,6 +79,8 @@ Flags:
 Global flags:
   -j, --json                   Output as JSON
   -C, --dir <DIR>              Run in a different directory
+      --tasks-dir <DIR>        Task store directory: exact path, must already
+                               exist (no discovery)
 
 === tk list ===
 List tasks
@@ -99,6 +107,8 @@ Flags:
 Global flags:
   -j, --json                 Output as JSON
   -C, --dir <DIR>            Run in a different directory
+      --tasks-dir <DIR>      Task store directory: exact path, must already
+                             exist (no discovery)
 
 === tk ready ===
 List active/open unblocked tasks
@@ -106,11 +116,13 @@ List active/open unblocked tasks
 Usage: tk ready
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk show ===
 Show task details
@@ -121,11 +133,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk start ===
 Start working on a task (open → active)
@@ -136,11 +150,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk open ===
 Reset a task status to open
@@ -151,11 +167,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk defer ===
 Defer a task
@@ -166,11 +184,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk done ===
 Complete a task
@@ -181,11 +201,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk close ===
 Close/cancel a task
@@ -196,11 +218,13 @@ Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk edit ===
 Edit a task
@@ -223,11 +247,15 @@ Flags:
       --parent <PARENT>           Parent task (or - to clear)
   -d, --desc <DESC>               Description (or - to clear)
       --estimate <ESTIMATE>       Estimate (or 0 to clear)
+      --if-rev <REV>              Reject the edit unless the task still has this
+                                  revision (`show --json`)
   -h, --help                      Print help
 
 Global flags:
   -j, --json                      Output as JSON
   -C, --dir <DIR>                 Run in a different directory
+      --tasks-dir <DIR>           Task store directory: exact path, must already
+                                  exist (no discovery)
 
 === tk log ===
 Add a log entry to a task
@@ -239,11 +267,13 @@ Arguments:
   [MSG]…  Log message
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk block ===
 Add a blocker dependency
@@ -255,11 +285,13 @@ Arguments:
   <BLOCKER>  Blocking task ID or ref
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk unblock ===
 Remove a blocker dependency
@@ -271,27 +303,51 @@ Arguments:
   <BLOCKER>  Blocking task ID or ref to remove
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk remove ===
 Delete a task
 
-Usage: tk remove [-f --force] <ID>
+Usage: tk remove [-f --force] [--if-rev <REV>] <ID>
 
 Arguments:
   <ID>  Task ID or ref
 
 Flags:
-  -f, --force      Skip confirmation
-  -h, --help       Print help
+  -f, --force            Skip confirmation
+      --if-rev <REV>     Reject the delete unless the task still has this
+                         revision (`show --json`)
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk repair ===
+Repair recorded inconsistencies in a task file
+
+Usage: tk repair [--drop-missing] <ID>
+
+Arguments:
+  <ID>  Task ID or ref
+
+Flags:
+      --drop-missing     Also drop references to missing blocker/parent tasks
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk mv ===
 Move a task to a different project
@@ -306,11 +362,13 @@ Arguments:
   <PROJECT>  Target project name
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk clean ===
 Remove old completed tasks
@@ -325,18 +383,62 @@ Flags:
 Global flags:
   -j, --json                     Output as JSON
   -C, --dir <DIR>                Run in a different directory
+      --tasks-dir <DIR>          Task store directory: exact path, must already
+                                 exist (no discovery)
 
 === tk check ===
 Check task integrity
 
+Exits non-zero when anything is reported, so scripts and agents cannot mistake
+findings for success.
+
 Usage: tk check
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk path ===
+Print the resolved task store location
+
+Usage: tk path
+
+Flags:
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
+
+=== tk lock ===
+Run a command while holding the store mutation lock
+
+The lock serializes cooperating tk writers (and, when used for sync, the
+checkout itself). The command must not run tk against the same store: the lock
+is advisory and not reentrant.
+
+Usage: tk lock [--scan <DIR>] [-- COMMAND]…
+
+Arguments:
+  [-- COMMAND]…  Command to run while holding the lock, after --
+
+Flags:
+      --scan <DIR>       Directory tree to scan for task stores to lock
+                         (repeatable)
+  -h, --help             Print help
+
+Global flags:
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config ===
 Show or set configuration
@@ -352,11 +454,13 @@ Commands:
   help         Print this message or the help of the given subcommand(s)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config show ===
 Show configuration
@@ -364,11 +468,13 @@ Show configuration
 Usage: tk config show
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config project ===
 Get or set the default project
@@ -382,11 +488,13 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config project show ===
 Show default project
@@ -394,11 +502,13 @@ Show default project
 Usage: tk config project show
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config project set ===
 Set default project
@@ -409,11 +519,13 @@ Arguments:
   <NAME>  Project name to set
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config project rename ===
 Rename project and all its tasks
@@ -425,11 +537,13 @@ Arguments:
   <NEW>  New project name
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config alias ===
 Manage directory aliases for -C
@@ -441,12 +555,14 @@ Arguments:
   [PATH]  Directory path
 
 Flags:
-  -r, --rm         Remove the alias
-  -h, --help       Print help
+  -r, --rm               Remove the alias
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config defaults ===
 Show or set default values
@@ -461,11 +577,13 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config defaults show ===
 Show default values
@@ -473,11 +591,13 @@ Show default values
 Usage: tk config defaults show
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config defaults priority ===
 Set default priority
@@ -488,11 +608,13 @@ Arguments:
   <LEVEL>  Default priority level (0-4)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config defaults labels ===
 Set default labels
@@ -503,11 +625,13 @@ Arguments:
   [LABELS]…  Default labels (comma-separated)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config defaults assignees ===
 Set default assignees
@@ -518,11 +642,13 @@ Arguments:
   [ASSIGNEES]…  Default assignees (comma-separated)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config clean-after ===
 Configure auto-cleanup
@@ -537,11 +663,13 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config clean-after show ===
 Show clean-after config
@@ -549,11 +677,13 @@ Show clean-after config
 Usage: tk config clean-after show
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config clean-after enable ===
 Enable auto-clean
@@ -561,11 +691,13 @@ Enable auto-clean
 Usage: tk config clean-after enable
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config clean-after disable ===
 Disable auto-clean
@@ -573,11 +705,13 @@ Disable auto-clean
 Usage: tk config clean-after disable
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)
 
 === tk config clean-after days ===
 Set clean-after days
@@ -588,8 +722,10 @@ Arguments:
   <DAYS>  Days after which to clean completed tasks
 
 Flags:
-  -h, --help       Print help
+  -h, --help             Print help
 
 Global flags:
-  -j, --json       Output as JSON
-  -C, --dir <DIR>  Run in a different directory
+  -j, --json             Output as JSON
+  -C, --dir <DIR>        Run in a different directory
+      --tasks-dir <DIR>  Task store directory: exact path, must already exist
+                         (no discovery)

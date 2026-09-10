@@ -11,7 +11,7 @@ pub struct AppCtx {
     pub color: bool,
 }
 
-/// Minimal task tracker. Plain JSON in .tasks/ — no daemons, no conflicts.
+/// Minimal task tracker. Plain JSON in .tasks/ — no daemons, no runtime.
 #[derive(Cli)]
 #[usage(bin = "tk", version, run_with)]
 pub struct Cli {
@@ -21,6 +21,9 @@ pub struct Cli {
     /// Run in a different directory
     #[usage(short = 'C', long, global, value_name = "DIR")]
     pub dir: Option<String>,
+    /// Task store directory: exact path, must already exist (no discovery)
+    #[usage(long = "tasks-dir", global, value_name = "DIR")]
+    pub tasks_dir: Option<String>,
     #[usage(subcommand)]
     pub command: Commands,
 }
@@ -62,12 +65,18 @@ pub enum Commands {
     /// Delete a task
     #[usage(alias = "rm")]
     Remove(crate::commands::Remove),
+    /// Repair recorded inconsistencies in a task file
+    Repair(crate::commands::Repair),
     /// Move a task to a different project
     Mv(crate::commands::Mv),
     /// Remove old completed tasks
     Clean(crate::commands::Clean),
-    /// Check task integrity
+    /// Check task integrity (non-zero exit on findings)
     Check(crate::commands::Check),
+    /// Print the resolved task store location
+    Path(crate::commands::StorePath),
+    /// Run a command while holding the store mutation lock
+    Lock(crate::commands::Lock),
     /// Show or set configuration
     Config(crate::commands::Config),
 }
@@ -75,7 +84,8 @@ pub enum Commands {
 pub fn run() -> miette::Result<()> {
     use miette::IntoDiagnostic;
     let cli = Cli::parse();
-    let store = StoreCtx::discover(cli.dir.as_deref()).into_diagnostic()?;
+    let store =
+        StoreCtx::resolve(cli.dir.as_deref(), cli.tasks_dir.as_deref()).into_diagnostic()?;
     let ctx = AppCtx {
         store,
         json: cli.json,

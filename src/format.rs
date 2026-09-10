@@ -216,6 +216,13 @@ pub fn format_task_detail(t: &TaskView, color: bool) -> String {
     if let Some(c) = &t.task.completed_at {
         lines.push(format!("Completed:   {}", timeutil::format_date(c)));
     }
+    lines.push(format!("Revision:    {}", t.rev));
+    if !t.unresolved_blockers.is_empty() {
+        lines.push(format!(
+            "Unresolved:  {} (missing tasks)",
+            t.unresolved_blockers.join(", ")
+        ));
+    }
     if !t.task.blocked_by.is_empty() {
         let state = if t.blocked_by_incomplete {
             " (blocked)"
@@ -297,6 +304,8 @@ mod tests {
                 root: "/tmp".into(),
                 tasks_dir: "/tmp".into(),
                 exists: false,
+                source: crate::store::StoreSource::Discovered,
+                worktree: false,
             },
             &Task {
                 project: "tk".into(),

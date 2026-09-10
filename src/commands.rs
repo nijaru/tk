@@ -16,7 +16,7 @@ pub use deps::{Block, Unblock};
 pub use edit::Edit;
 pub use list::{List, Ready};
 pub use log::Log;
-pub use misc::{Check, Clean, Init, Mv, Remove};
+pub use misc::{Check, Clean, Init, Lock, Mv, Remove, Repair, StorePath};
 pub use show::Show;
 pub use status::{Close, Defer, Done, Open, Start};
 
@@ -26,6 +26,8 @@ use crate::cli::AppCtx;
 use crate::ids;
 
 /// Resolve a user-supplied ID/prefix/ref against the store.
+///
+/// Read-only callers use this; mutations resolve inside their transaction.
 pub fn resolve(ctx: &AppCtx, input: &str) -> miette::Result<String> {
     ctx.require_store()?;
     ids::resolve_id(&ctx.store.tasks_dir, input).into_diagnostic()

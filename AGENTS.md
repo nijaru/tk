@@ -12,7 +12,7 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 | `src/commands/`    | One module per command; `misc.rs` holds Remove/Init/Mv/Clean/Check |
 | `src/commands/config.rs` | Nested `config` subcommands (project/alias/defaults/clean-after) |
 | `src/model.rs`     | `Task`, `Config`, `Status`, `Priority` — lenient serde for old files |
-| `src/store.rs`     | `Ctx` (no globals), atomic writes, CRUD, list/filter, integrity |
+| `src/store.rs`     | `Ctx` (store resolution), `Txn` (locked mutations), atomic writes, CRUD, list/filter, integrity |
 | `src/ids.rs`       | Project/ref validation, ref generation, ID resolution          |
 | `src/timeutil.rs`  | Due parsing (`+7d`), calendar-day overdue, RFC3339Nano stamps  |
 | `src/format.rs`    | Table/JSON output, color handling, unicode-safe truncation     |
@@ -55,6 +55,8 @@ Minimal task tracker CLI — plain JSON in `.tasks/`, single binary, no runtime.
 | Aspect         | Standard                                                                 |
 | -------------- | ------------------------------------------------------------------------ |
 | Durability     | Atomic writes must `f.Sync()` file and dir before `rename`               |
+| Mutations      | Every write runs inside `Txn` (one advisory lock over resolve→read→validate→edit→persist). Never open two transactions on one store. |
+| Reads          | Read-only commands take no lock and never repair; `show` reports, `repair` fixes |
 | Precision      | RFC3339Nano stamps; calendar-day (not 24h) overdue math                  |
 | Error handling | `miette` diagnostics that read like what the user sees                   |
 | Testing        | `usage::test` harness for help drift; `assert_cmd` for end-to-end flows  |
@@ -67,6 +69,7 @@ Commands that must pass before any milestone:
 - **Format**: `cargo fmt --all --check`
 - **Unit + integration tests**: `cargo test --all-targets`
 - **Manual Check**: `tk ready` and `tk list -a` output verification
+- **Concurrency**: `cargo test --test cli concurrent` (real multi-process appends/labels; fails without the store lock)
 
 ## Distribution
 

@@ -5,9 +5,6 @@ use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::format;
-use crate::store;
-
-use super::resolve;
 
 /// Add a log entry to a task
 #[derive(Args)]
@@ -22,16 +19,18 @@ impl RunWith<AppCtx> for Log {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let id = resolve(&ctx, &self.id)?;
         let msg = self.msg.join(" ");
         if msg.trim().is_empty() {
             return Err(miette::miette!("log message cannot be empty"));
         }
-        let t = store::add_log(&ctx.store, &id, &msg).into_diagnostic()?;
+        // The append is applied to current state under the store lock.
+        let txn = ctx.store.txn().into_diagnostic()?;
+        let id = txn.resolve(&self.id).into_diagnostic()?;
+        let t = txn.add_log(&id, &msg).into_diagnostic()?;
         if ctx.json {
             println!("{}", format::format_json(&t));
         } else {
-            println!("Logged to {}: {msg}", t.id());
+            println!("Logged to {}: {msg}", t.id);
         }
         Ok(())
     }

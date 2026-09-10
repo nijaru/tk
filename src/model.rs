@@ -276,7 +276,15 @@ pub struct TaskView {
     #[serde(flatten)]
     pub task: Task,
     pub id: String,
+    /// Content fingerprint of the record as read. Pass it back as `--if-rev`
+    /// to reject an edit that was prepared against a stale read.
+    pub rev: String,
+    /// A blocker is incomplete, or refers to a task file that no longer
+    /// resolves. Unresolved blockers count as blocking, not as completed.
     pub blocked_by_incomplete: bool,
+    /// Blockers that do not resolve to a task file in the store.
+    #[serde(default)]
+    pub unresolved_blockers: Vec<String>,
     pub is_overdue: bool,
     pub days_until_due: Option<i64>,
 }

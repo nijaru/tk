@@ -3,7 +3,7 @@
 Minimal task tracker. Simple, fast, git-friendly.
 
 - Plain JSON files in `.tasks/`
-- No daemons, no merge conflicts, no viruses
+- One advisory lock per mutation, so concurrent writers do not lose updates
 - Single binary, no runtime dependency
 
 ## Install
@@ -90,9 +90,12 @@ myapp-x9k2  | p2   | open         | Write tests
 | `tk block <id> <blocker>`   | Add dependency (id blocked by blocker)     |
 | `tk unblock <id> <blocker>` | Remove dependency                          |
 | `tk remove` / `tk rm <id>`  | Delete task (prompts for confirmation)     |
+| `tk repair <id>`            | Fix recorded inconsistencies in a task file |
 | `tk mv <id> <project>`      | Move task to a different project           |
 | `tk clean`                  | Remove old terminal tasks (default: 14d)   |
-| `tk check`                  | Check task integrity                       |
+| `tk check`                  | Check task integrity (non-zero on findings) |
+| `tk path`                   | Print the resolved task store location     |
+| `tk lock -- CMD`            | Run a command while holding the store lock |
 | `tk config`                 | Show/set configuration                     |
 
 ## Add Options
@@ -183,17 +186,71 @@ tk __usage_spec__ | usage generate manpage -f -
 ## Global Options
 
 - `-C <dir>` — Run in different directory
+- `--tasks-dir <dir>` — Use this task store directory exactly (no discovery; must exist)
 - `-j, --json` — Output as JSON
 - `-V, --version` — Show version
 - `-h, --help` — Show help
 
+## Store Selection
+
+Without an override, tk walks up from the working directory to the nearest
+`.tasks/` or `.git`. `-C <dir>` runs that search from another directory.
+`--tasks-dir <dir>` (or `TK_TASKS_DIR`) names the store exactly: no walking, and
+a missing store is an error rather than a new one. `tk init` is the deliberate
+exception — it creates the store, including an explicitly designated one.
+
+`tk init` errors when the directory already holds a store. `tk add` bootstraps a
+store for a plain directory or normal checkout, but refuses inside a linked
+worktree or submodule (where `.git` is a file) so it cannot grow a second task
+queue in a worker checkout; use `tk init` or point `--tasks-dir` at the shared
+store. `tk path --json` reports the selected store, how it was selected, and
+whether it exists.
+
+## Concurrency and Integrity
+
+Every mutation (add, edit, log, block, status change, move, remove, clean)
+runs inside one advisory lock on `<store>/.lock`, covering resolve → read →
+validate → edit → persist. Concurrent `tk` writers serialize instead of
+overwriting each other. Read-only commands take no lock and never repair:
+`tk show` reports an unresolvable blocker or parent, and only
+`tk repair <id> [--drop-missing]` changes the record. A missing prerequisite
+counts as blocking, so it never makes a dependent look ready. `tk check` exits
+non-zero when it finds anything, and prints `{"ok":false,"issues":[...]}` with
+`--json`.
+
+`list --json` and `show --json` include a `rev` fingerprint. Pass it back as
+`--if-rev <rev>` on `edit` or `remove` to reject an operation prepared against a
+stale read:
+
+```bash
+rev=$(tk show a7b3 --json | jq -r .rev)
+tk edit a7b3 -t "New title" --if-rev "$rev"
+```
+
+The lock only serializes cooperating `tk` processes. A Git checkout, an editor,
+or an older `tk` binary writes without it, so re-read after a pull. To include a
+sync step in the same guarantee, run it under the lock; `--scan` locks every
+store under a path in sorted order, which is what a multi-store records
+checkout needs:
+
+```bash
+tk lock -- git pull --ff-only
+tk lock --scan ~/records -- git -C ~/records pull --ff-only
+```
+
+The command must not run `tk` against a store it already locked; the lock is
+advisory and not reentrant. Locks and temp files are covered by the `.gitignore`
+tk writes inside `.tasks/` when it creates a store.
+
 ## Environment
 
 - `NO_COLOR` — Disable colored output
+- `TK_TASKS_DIR` — Task store directory (same contract as `--tasks-dir`)
 
 ## Storage
 
-Plain JSON files in `.tasks/` — one file per task, one config file.
+Plain JSON files in `.tasks/` — one file per task, one config file, one `.lock`
+for the mutation guard.
 
 ## License
 

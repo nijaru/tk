@@ -6,9 +6,6 @@ use usage::{Args, RunWith};
 use crate::cli::AppCtx;
 use crate::format;
 use crate::model::Status;
-use crate::store;
-
-use super::resolve;
 
 macro_rules! status_cmd {
     ($name:ident, $status:expr, $verb:literal, $doc:literal) => {
@@ -23,8 +20,9 @@ macro_rules! status_cmd {
             type Output = miette::Result<()>;
 
             fn run_with(self, ctx: AppCtx) -> Self::Output {
-                let id = resolve(&ctx, &self.id)?;
-                let t = store::update_status(&ctx.store, &id, $status).into_diagnostic()?;
+                let txn = ctx.store.txn().into_diagnostic()?;
+                let id = txn.resolve(&self.id).into_diagnostic()?;
+                let t = txn.update_status(&id, $status).into_diagnostic()?;
                 if ctx.json {
                     println!("{}", format::format_json(&t));
                 } else {

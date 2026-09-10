@@ -8,8 +8,6 @@ use crate::model::Priority;
 use crate::store::{self, CreateOptions};
 use crate::{format, timeutil};
 
-use super::resolve;
-
 /// Create a task
 #[derive(Args)]
 pub struct Add {
@@ -57,14 +55,23 @@ impl RunWith<AppCtx> for Add {
             .transpose()
             .into_diagnostic()?
             .flatten();
-        let parent = self.parent.map(|p| resolve(&ctx, &p)).transpose()?;
+
+        // Resolution, parent validation, and the write share one transaction.
+        let txn = ctx.store.txn_bootstrap().into_diagnostic()?;
+        let parent = self
+            .parent
+            .map(|p| txn.resolve(&p))
+            .transpose()
+            .into_diagnostic()?;
+        if let Some(p) = &parent {
+            store::validate_parent(txn.ctx(), p, "").into_diagnostic()?;
+        }
 
         let labels = (!self.labels.is_empty()).then_some(self.labels);
         let assignees = (!self.assignees.is_empty()).then_some(self.assignees);
 
-        let t = store::create_task(
-            &ctx.store,
-            CreateOptions {
+        let t = txn
+            .create(CreateOptions {
                 title: self.title.join(" "),
                 description: self.desc,
                 priority,
@@ -74,9 +81,8 @@ impl RunWith<AppCtx> for Add {
                 parent,
                 estimate: self.estimate,
                 due_date,
-            },
-        )
-        .into_diagnostic()?;
+            })
+            .into_diagnostic()?;
 
         if ctx.json {
             println!("{}", format::format_json(&t));
