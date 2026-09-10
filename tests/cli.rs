@@ -495,6 +495,70 @@ fn repair_drops_dangling_references_only_when_asked() {
     ok_in(dir.path(), &["check"]);
 }
 
+#[test]
+fn concurrent_opposite_blocks_never_create_a_cycle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let a = add_task(dir.path(), "alpha");
+    let b = add_task(dir.path(), "beta");
+
+    // Each writer validates the graph under the same lock as its write, so
+    // whichever loses the race must observe the other's edge.
+    let spawn = |id: &str, blocker: &str| {
+        bin()
+            .arg("-C")
+            .arg(dir.path())
+            .args(["block", id, blocker])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn block")
+    };
+    let first = spawn(&b, &a);
+    let second = spawn(&a, &b);
+    let outputs: Vec<_> = [first, second]
+        .into_iter()
+        .map(|c| c.wait_with_output().expect("wait"))
+        .collect();
+
+    let failures: Vec<String> = outputs
+        .iter()
+        .filter(|o| !o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+        .collect();
+    assert_eq!(failures.len(), 1, "exactly one direction must lose");
+    assert!(
+        failures[0].contains("circular dependency"),
+        "{}",
+        failures[0]
+    );
+
+    ok_in(dir.path(), &["check"]);
+}
+
+#[test]
+fn check_reports_a_dependency_cycle_on_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    ok_in(dir.path(), &["init", "-P", "demo"]);
+    let a = add_task(dir.path(), "alpha");
+    let b = add_task(dir.path(), "beta");
+
+    // Write a cycle directly, the way a hand edit or an old writer could.
+    for (this, other) in [(&a, &b), (&b, &a)] {
+        let path = store_dir(dir.path()).join(format!("{this}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("task file"))
+                .expect("json");
+        value["blocked_by"] = serde_json::json!([other]);
+        std::fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+    }
+
+    let out = run_in(dir.path(), &["check"]);
+    assert!(!out.status.success(), "a cycle must fail the check");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("dependency cycle"), "{text}");
+}
+
 // --- Regressions: stale intent ----------------------------------------------
 
 #[test]
