@@ -1,19 +1,21 @@
 # tk
 
 A task tracker for a Git checkout: one static binary, one JSON document per task
-in `.tasks/`, no daemon, no database, no index.
+in `.tasks/`, no daemon, no database, no index, no configuration.
 
 - Each task is a plain file you can read, diff, grep, and edit by hand.
 - Identity is a 4-character `ref` that never changes; the filename carries it
   plus a title mnemonic, so a directory listing is readable.
-- Three states, labels, and one kind of dependency. That is the whole model.
+- Three states, labels, one append-only log, and one kind of dependency. That is
+  the whole model.
 
 Deliberately out of scope: due dates, estimates, priority, assignment, claims,
-and projects. Across 169 real tasks in the store this was built from, `priority`
-was never set to anything but its default, `project` was always the store's own
-name, and `due_date`, `estimate`, `parent`, `links`, and `assignees` were never
-used at all. What a task needs beyond its title, state, labels, and dependencies
-goes in its `status` line and its log.
+and projects. Across the 169 real tasks this was built from, `priority` was
+never set to anything but its default, `project` was always the store's own
+name, and due dates, estimates, assignees, parents, and attachments were never
+used. A replaceable status field and a list of acceptance criteria were also cut
+after the same measurement came back empty — the log is the record, and its last
+entry is the current state of play.
 
 ## Install
 
@@ -36,7 +38,7 @@ $ tk add "Implement auth" -l backend
 $ tk add "Write tests" -b 55ka        # waits on the auth work
 fqne  Write tests
 
-$ tk ready                            # open, and nothing in the way
+$ tk                                  # no arguments: what can I start?
 55ka | open | backend | Implement auth
 
 1 entry
@@ -46,8 +48,6 @@ Everything that happens to a task is a small change to one document:
 
 ```bash
 $ tk note 55ka "Using the JWT approach"
-$ tk status 55ka "middleware done; needs review"
-$ tk accept 55ka "parity test passes"
 $ tk done 55ka
 55ka  done  Implement auth
 
@@ -61,36 +61,37 @@ $ tk ls -a                            # everything, including finished work
 fqne | open |                          | Write tests
 
 2 entries
+
+$ tk open 55ka                        # reopening forgets the completion time
 ```
 
 ## Commands
 
 | Command | Description |
 | ------- | ----------- |
+| `tk` | Same as `tk ready`: what can be started now |
 | `tk init` | Create `.tasks/` here |
-| `tk add <title>` (`new`) | Create a task (`-l` labels, `--accept`, `-b` blocker, `--status`, `-q` ref only) |
+| `tk add <title>` (`new`) | Create a task (`-l` labels, `-b` blocker, `-q` ref only) |
 | `tk list` (`ls`) | List tasks: open by default, `-a` for everything, `-s`/`-l`/`-q` to filter |
 | `tk ready` (`rdy`) | List open tasks that nothing is blocking |
-| `tk show <ref>` | Show one task in full |
+| `tk show <ref>` | Show one task: its fields, blockers, and log |
 | `tk note <ref> <text>` (`log`) | Append a log entry |
-| `tk status <ref> [text]` | Replace the current status (`--clear`) |
-| `tk state <ref> <state>` | `open`, `done`, or `dropped` |
-| `tk done <ref>` / `tk drop <ref>` | Shorthands for the two closing states |
-| `tk label <ref> [+x\|-x\|x]` (`tag`) | Add, remove, or replace labels |
-| `tk accept <ref> <criterion>` | Acceptance criteria (`--set`, `--remove`, `--clear`) |
-| `tk block <ref> <blocker>` | Add a blocking dependency |
-| `tk unblock <ref> <blocker>` | Remove one |
-| `tk edit <ref>` | Change any field in one write (see below) |
+| `tk done <ref>` / `tk drop <ref>` / `tk open <ref>` | Close it, abandon it, reopen it |
+| `tk label <ref> +x -y` (`tag`) | Add and remove labels |
+| `tk block <ref> <blocker>` / `tk unblock <ref> <blocker>` | Add or remove a dependency |
+| `tk edit <ref>` | Change fields, labels, or blockers in one write |
 | `tk purge <ref>` (`rm`) | Delete a task, and drop references to it |
 | `tk check` (`ck`) | Check store integrity; non-zero exit on findings |
 | `tk apply` | Run a batch of intents from stdin under one lock |
 | `tk path` | Print the store this directory resolves to |
-| `tk lock -- CMD` | Run a command while holding the store lock |
-| `tk config` | Show the store, or name a directory for `-C` |
 
 A `<ref>` is the 4-character ref or part of the title: `tk show 55ka`,
 `tk show auth`, and `tk show AUTH` all work. Two matches is an error, not a
 guess.
+
+State is three verbs, not a value you can misspell: `done`, `drop`, and `open`.
+Any other state is unrepresentable from the command line, and a batch that asks
+for one is refused before anything is written.
 
 ## The record
 
@@ -104,8 +105,6 @@ guess.
   "updated": "2026-09-10T15:10:32.439805000Z",
   "done": null,
   "blocked_by": ["fqne"],
-  "status": "middleware done; needs review",
-  "acceptance": ["parity test passes"],
   "log": [
     {"ts": "2026-09-10T15:10:32.4Z", "msg": "Using the JWT approach"}
   ]
@@ -113,19 +112,20 @@ guess.
 ```
 
 - `ref`, `title`, `state`, `created`, `updated` are required.
-- `labels`, `blocked_by`, `acceptance`, and `log` are always present, possibly
-  empty. `done` is always present and `null` unless the state is `done` or
-  `dropped`. `status` is omitted when there is none.
+- `labels`, `blocked_by`, and `log` are always present, possibly empty. `done` is
+  always present and `null` unless the state is `done` or `dropped`.
 - Key order is the file's shape; the parser does not care, but writing it back
   keeps that order.
 - **Keys tk does not know are preserved.** Add `"assignee": "nick"` by hand and
   it survives every tk write, so a field you need today does not require a
   format change.
 
-`status` is the current summary — result, blocker, next step. The log is what
-happened, appended and never rewritten. References to files and URLs live in the
-`status` or a log entry; evidence of verification is a log entry beginning
-`verified:`.
+The log is the history and it is only ever appended to. Where things stand is
+its last entry, which cannot go stale and cannot disagree with itself. Evidence
+of verification is a log entry beginning `verified:`; a document or a URL is
+named in a log entry, and long-form documents can live in a subdirectory beside
+the entries — `.tasks/reports/<ref>-notes.md`, say — which is what `check`
+leaves alone on purpose.
 
 ## Identity and files
 
@@ -152,6 +152,14 @@ Finishing a blocker is enough to unblock dependents — nothing needs updating.
 `tk purge` removes references to the task it deletes, so nothing is left
 permanently unready.
 
+## Labels
+
+Labels change by delta: `+x` adds, `-x` removes. A bare label is refused, with a
+message saying so, because the bare form reads like an add and behaves like a
+replacement of whatever was there — the one way a stray command silently discards
+someone else's work. Replacing the whole set is `tk edit --label a,b`, which is
+what you type when that is what you mean.
+
 ## JSON output
 
 Every command answers `--json` with the same envelope, including failures:
@@ -174,8 +182,9 @@ the envelope to stdout with `ok: false`.
 `error_code` is a stable kind: `not_found`, `ambiguous`, `stale_revision`,
 `not_a_store`, `store_not_found`, `invalid_input`, `check_failed`, `io`,
 `parse`, `usage`, `error`. A human sees a sentence; a machine sees the code.
-`issues` carries anything true but not fatal — an unresolvable blocker, files
-the store could not read.
+`issues` carries anything true but not fatal — an entry that could not be read,
+a blocker that names nothing — and a human sees those on stderr while the exit
+code stays zero, because the read itself succeeded.
 
 ## Batches
 
@@ -184,20 +193,21 @@ the store could not read.
 ```bash
 echo '{"intents":[
   {"op":"add","title":"Write tests","blocked_by":["55ka"]},
-  {"op":"status","ref":"55ka","text":"review pending"},
   {"op":"note","ref":"55ka","message":"wired up"},
   {"op":"state","ref":"55ka","state":"done"}]}' | tk apply --json
 ```
 
-Intents are `add`, `note`, `status`, `state`, `edit`, `block`, `unblock`,
-`label`, `accept`, and `purge`. Each one calls exactly the same operation as the
-matching command, so the two cannot disagree — a test runs both and compares the
-resulting documents field by field.
+One shape: an object with an `intents` array. Intents are `add`, `note`,
+`state`, `edit`, `block`, `unblock`, `label`, and `purge`. Each one calls exactly
+the same operation as the matching command, so the two cannot disagree — a test
+runs both and compares the resulting documents field by field.
 
 A batch that cannot be parsed costs no writes: the shape of every intent is
-checked first. It is **not** a transaction, though. Intents are written one at a
-time in order, a failure stops the batch, and earlier intents stay applied. The
-report says so, and says how many intents were not attempted.
+checked first, and a value no state can hold (say `"state": "active"`) refuses
+the whole batch before the first intent runs. It is **not** a transaction,
+though. Intents are written one at a time in order, a failure stops the batch,
+and earlier intents stay applied. The report says so, and says how many intents
+were not attempted.
 
 `--dry-run` resolves the refs each intent names and reports what would happen,
 writing nothing. It cannot check a constraint that depends on an earlier intent
@@ -227,11 +237,10 @@ Error: not a tk format-3 store at /home/me/myapp/.tasks
 ## Concurrency and integrity
 
 A change is a read-modify-write of a whole document, so every write holds an
-advisory lock on `.tasks/.lock`. Read-modify-write under a lock means
-concurrent `tk note`, `tk label +x`, and `tk add` from several agents all
-survive: eight concurrent appends produce eight log entries, and eight
-concurrent creates allocate eight distinct refs. Reads take no lock and never
-wait.
+advisory lock on `.tasks/.lock`. Read-modify-write under a lock means concurrent
+`tk note`, `tk label +x`, and `tk add` from several agents all survive: eight
+concurrent appends produce eight log entries, and eight concurrent creates
+allocate eight distinct refs. Reads take no lock and never wait.
 
 `show --json` carries a `rev`, a fingerprint of the document as read. Pass it
 back to refuse a change prepared against a stale read — the only defense against
@@ -239,18 +248,18 @@ two writers silently clobbering each other:
 
 ```bash
 rev=$(tk show 55ka --json | jq -r .data.rev)
-tk edit 55ka --title "New title" --if-rev "$rev"
+tk note 55ka "after that pull" --if-rev "$rev"
 ```
 
 The lock serializes cooperating `tk` processes only. An editor, a Git checkout,
-or an older binary writes without it, so re-read after a pull, and use
-`tk lock -- git pull --ff-only` to include a sync step in the same guarantee.
+or an older binary writes without it, so re-read after a pull.
 
-Reads report rather than repair: `tk show` names an unresolvable blocker and
-`tk check` exits non-zero on any finding — an unparseable file, a filename that
-disagrees with its contents, a duplicate ref, a blocking loop, a state that
-disagrees with its `done` time. A hand edit that breaks the JSON is reported by
-name and line, not silently skipped.
+Reads report rather than repair. `tk show` names an unresolvable blocker, `tk ls`
+says on stderr which files it could not read, and `tk check` exits non-zero on
+any finding — an unparseable file, a filename that disagrees with its contents, a
+duplicate ref, a blocking loop, a state that disagrees with its `done` time, or a
+file in the store that tk did not write (debris from an interrupted write, say).
+Directories are ignored: tk writes files, so a directory beside them is yours.
 
 ## Migrating from v0 or v1
 
@@ -262,34 +271,20 @@ tk check                                 # expect no findings
 ```
 
 It handles both older layouts — v0 (`config.json` plus one document per task)
-and v1 (`store.json` plus `records/<ulid>.jsonl` event logs, including the
-event fold) — reuses a legacy ref as the new ref when it is valid and free,
-remaps `blocked_by`, turns `checkpoint` into `status` and `evidence` into
-`verified:` log entries, writes `MIGRATION.md` mapping every old handle to its
-new ref, and moves the consumed files into `.tasks/legacy/` rather than deleting
-them. Dropped fields are counted and reported by name. It is deliberately not a
-subcommand: it runs once per store and then has no reason to exist.
+and v1 (`store.json` plus `records/<ulid>.jsonl` event logs, including the event
+fold) — reuses a legacy ref as the new ref when it is valid and free, remaps
+`blocked_by`, and writes `MIGRATION.md` mapping every old handle to its new ref.
+Fields that v3 does not have become marked log entries rather than being
+dropped: `checkpoint` becomes `status: …`, acceptance criteria become
+`acceptance: …`, and evidence becomes `verified: …`. Consumed files move to
+`.tasks/legacy/` rather than being deleted, and fields with no equivalent at all
+(`description`, `priority`, `project`, due dates, estimates, assignees, parents)
+are counted and reported by name. It is deliberately not a subcommand: it runs
+once per store and then has no reason to exist.
 
-**Stop older writers first.** An older `tk` sees zero tasks in a v2 store and
-will write its own files beside them; the v2 side refuses the older layout, the
+**Stop older writers first.** An older `tk` sees zero tasks in a v3 store and
+will write its own files beside them; the v3 side refuses the older layout, the
 older side does not notice.
-
-## Config
-
-```bash
-tk config                        # the store, its format, its entry count, its aliases
-tk config alias web src/web      # name a directory so -C web finds it
-tk config alias web              # forget it
-```
-
-`.tk.json` holds the format version and those aliases:
-
-```json
-{
-  "format": 3,
-  "aliases": {"web": "src/web"}
-}
-```
 
 ## Shell completions
 
@@ -307,13 +302,18 @@ tk __usage_spec__ | usage generate manpage -f -
 
 ```
 .tasks/
-  .tk.json                        # {"format": 3, "aliases": {...}}
+  .tk.json                        # {"format": 3}
   .lock                           # the mutation lock
   .gitignore                      # .lock, .tmp.*
   55ka-implement-auth.json        # one task per file
+  reports/                        # optional: documents a task refers to
   legacy/                         # whatever a migration moved aside
   MIGRATION.md                    # old handles -> refs, if migrated
 ```
+
+The store file carries the layout version and nothing else: there is nothing to
+configure, and a settings file that exists to hold defaults is a place for
+defaults to hide.
 
 There is no index and nothing derived: `list` reads every document, which
 measured 20ms for 161 entries on a laptop. An index only becomes worth its
