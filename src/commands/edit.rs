@@ -7,12 +7,15 @@
 //!
 //! `+label` and `-label` are deltas and stay lock-free, so concurrent agents can
 //! each add their own label without losing anyone's edit.
+//!
+//! The edit itself is applied by [`ops::apply_edit`], which is also what
+//! `tk apply` calls, so the two cannot disagree about fields or order.
 
 use usage::{Args, RunWith};
 
 use crate::cli::AppCtx;
 use crate::model::Priority;
-use crate::ops::{self, ListEdit, ListField, Mutation};
+use crate::ops::{self, Mutation};
 
 /// Edit a task
 #[derive(Args)]
@@ -49,47 +52,18 @@ impl RunWith<AppCtx> for Edit {
     type Output = miette::Result<()>;
 
     fn run_with(self, ctx: AppCtx) -> Self::Output {
-        let replaces_labels = self.labels.iter().any(|v| !is_delta(v));
-        // A parent change validates other records; a replacement reads this one.
-        let needs_lock = self.if_rev.is_some() || self.parent.is_some() || replaces_labels;
-
-        let m = Mutation::choose(&ctx.store, needs_lock)?;
+        let edit = ops::Edit {
+            title: self.title,
+            description: self.desc.map(clearable),
+            priority: self.priority.as_deref().map(Priority::parse).transpose()?,
+            parent: self.parent.map(clearable),
+            labels: self.labels,
+            remove_labels: self.remove_labels,
+            if_rev: self.if_rev,
+        };
+        let m = Mutation::choose(&ctx.store, edit.needs_lock())?;
         let id = m.store().resolve(&self.id)?;
-
-        // One conditional check for the whole edit. Checking per append would
-        // reject the second field of a legitimate multi-field edit, because the
-        // first append already moved the revision.
-        m.check_rev(&id, self.if_rev.as_deref())?;
-
-        if let Some(title) = self.title {
-            ops::set_title(&m, &id, title, None)?;
-        }
-        if let Some(priority) = &self.priority {
-            ops::set_priority(&m, &id, Priority::parse(priority)?)?;
-        }
-        if let Some(desc) = self.desc {
-            let value = (desc != "-").then_some(desc);
-            ops::set_description(&m, &id, value, None)?;
-        }
-        if let Some(parent) = self.parent {
-            if parent == "-" {
-                ops::set_parent(&m, &id, None)?;
-            } else {
-                let pid = m.store().resolve(&parent)?;
-                ops::set_parent(&m, &id, Some(&pid))?;
-            }
-        }
-
-        let mut label_ops = self.labels;
-        label_ops.extend(self.remove_labels.iter().map(|l| format!("-{l}")));
-        let updated = ops::edit_list(
-            &m,
-            &id,
-            ListField::Labels,
-            ListEdit::Deltas(&label_ops),
-            None,
-        )?;
-
+        let updated = ops::apply_edit(&m, &id, &edit)?;
         let human = format!("Updated {}: {}", updated.task.alias, updated.task.title);
         ctx.emit(
             "edit",
@@ -102,7 +76,7 @@ impl RunWith<AppCtx> for Edit {
     }
 }
 
-/// `+x` adds, `-x` removes, a bare value replaces the set.
-fn is_delta(value: &str) -> bool {
-    value.starts_with('+') || value.starts_with('-')
+/// `-` is how the CLI says "clear this".
+fn clearable(value: String) -> Option<String> {
+    (value != "-").then_some(value)
 }

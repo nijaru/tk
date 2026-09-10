@@ -93,9 +93,28 @@ checkout.
 | Reads          | Take no lock and never repair; `show` reports, `check` reports for the store, `recover` truncates a torn tail |
 | Identity       | ULID + immutable alias; `project` is display only. Resolution: alias → ID → unique prefix |
 | Revision       | `rev` is `writer:line_count:content_hash8`; `--if-rev` compares under the lock so it means something |
-| Errors         | Store and input errors convert with `?`, not `into_diagnostic()` — the latter wraps them opaquely and loses `error_code` |
+| Errors         | Store and input errors convert with `?`, not `into_diagnostic()` — the latter wraps them opaquely and loses `error_code`. `Diagnostic::code()` is left empty on purpose: miette prints whatever it returns in front of the message a human reads (`Error: invalid_input`). `cli::run` recovers the kind from the error's concrete type for the JSON envelope instead. |
 | Precision      | RFC3339Nano stamps; calendar-day (not 24h) overdue math                  |
 | Testing        | `usage::test` harness for help drift; `assert_cmd` for end-to-end flows  |
+
+## Known boundaries
+
+Stated here so they are decisions rather than surprises:
+
+- **Replace versus delta.** `tk edit -l a,b` replaces the label set, computed
+  from a read under the store lock; `-l +x` is a lock-free append. A `+x` that
+  lands between the replace's read and its write is overwritten. Per-element
+  last-writer-wins would fix that and needs per-element timestamps, which is more
+  machinery than an unobserved race justifies. The commands that matter
+  concurrently (`+`/`-` deltas, `log`, status) are the lock-free ones, and
+  `concurrent_label_deltas_are_not_lost` covers them.
+- **Scale.** `list` and `ready` fold every record; there is no index. Measured on
+  this machine: 20ms for 161 records / 456 events, so roughly linear and about
+  1.2s at 10k. An index is unnecessary below about a thousand tasks; past that,
+  revisit with measurements rather than adding one on principle.
+- **Lock scope.** `<store>/.lock` serializes cooperating `tk` processes only. A
+  Git checkout, an editor, or an older `tk` binary writes without it. `tk lock`
+  exists to bring an external step (a pull, a sync) under the same guarantee.
 
 ## Verification Steps
 

@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{Priority, Status, TaskView};
-use crate::ops::{self, ListEdit, ListField, Mutation};
+use crate::ops::{self, Edit, ListEdit, ListField, Mutation};
 use crate::store::{CreateOptions, StoreError};
 use crate::{cli::AppCtx, ids};
 
@@ -444,6 +444,11 @@ fn reaches(
     false
 }
 
+/// `-` is how both the CLI and a JSON intent say "clear this".
+fn clearable(value: String) -> Option<String> {
+    (value != "-").then_some(value)
+}
+
 fn short(id: &str) -> String {
     id.chars().take(8).collect()
 }
@@ -486,28 +491,17 @@ fn execute(m: &Mutation<'_>, intent: &Intent) -> Result<Option<TaskView>, StoreE
         }
         Intent::Edit(e) => {
             let id = m.store().resolve(&e.id)?;
-            m.check_rev(&id, e.if_rev.as_deref())?;
-            if let Some(title) = &e.title {
-                ops::set_title(m, &id, title.clone(), None)?;
-            }
-            if let Some(desc) = &e.desc {
-                let value = (desc != "-").then(|| desc.clone());
-                ops::set_description(m, &id, value, None)?;
-            }
-            if let Some(priority) = e.priority {
-                ops::set_priority(m, &id, priority)?;
-            }
-            if let Some(parent) = &e.parent {
-                if parent == "-" {
-                    ops::set_parent(m, &id, None)?;
-                } else {
-                    let pid = m.store().resolve(parent)?;
-                    ops::set_parent(m, &id, Some(&pid))?;
-                }
-            }
-            let mut labels = e.labels.clone();
-            labels.extend(e.remove_labels.iter().map(|l| format!("-{l}")));
-            ops::edit_list(m, &id, ListField::Labels, ListEdit::Deltas(&labels), None)?
+            // The same edit the CLI builds, applied by the same function.
+            let edit = Edit {
+                title: e.title.clone(),
+                description: e.desc.as_ref().map(|d| clearable(d.clone())),
+                priority: e.priority,
+                parent: e.parent.as_ref().map(|p| clearable(p.clone())),
+                labels: e.labels.clone(),
+                remove_labels: e.remove_labels.clone(),
+                if_rev: e.if_rev.clone(),
+            };
+            ops::apply_edit(m, &id, &edit)?
         }
         Intent::Block(e) => {
             let id = m.store().resolve(&e.id)?;

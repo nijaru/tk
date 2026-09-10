@@ -172,6 +172,75 @@ pub fn add_log(m: &Mutation<'_>, id: &str, msg: &str) -> Result<TaskView, StoreE
 }
 
 // ---------------------------------------------------------------------------
+// Multi-field edit
+// ---------------------------------------------------------------------------
+
+/// A multi-field edit: what `tk edit` and `{"op":"edit"}` both express.
+///
+/// One struct so the two paths cannot apply the fields in different orders or
+/// forget one when a field is added.
+#[derive(Debug, Default, Clone)]
+pub struct Edit {
+    pub title: Option<String>,
+    /// `None` leaves the description; `Some(None)` clears it.
+    pub description: Option<Option<String>>,
+    pub priority: Option<Priority>,
+    /// `None` leaves the parent; `Some(None)` clears it; `Some(Some(r))` sets it
+    /// from a reference, which is resolved here.
+    pub parent: Option<Option<String>>,
+    /// As the CLI accepts them: `+x` adds, `-x` removes, a bare value replaces.
+    pub labels: Vec<String>,
+    pub remove_labels: Vec<String>,
+    pub if_rev: Option<String>,
+}
+
+impl Edit {
+    /// Does this edit need the store lock?
+    ///
+    /// A parent change validates other records, a bare label value is a
+    /// read-modify-write, and `--if-rev` must compare and write together.
+    pub fn needs_lock(&self) -> bool {
+        self.if_rev.is_some()
+            || self.parent.is_some()
+            || self.labels.iter().any(|v| !v.starts_with(['+', '-']))
+    }
+}
+
+/// Apply a multi-field edit in a fixed order.
+///
+pub fn apply_edit(m: &Mutation<'_>, id: &str, edit: &Edit) -> Result<TaskView, StoreError> {
+    // One conditional check for the whole edit. Checking per field would reject
+    // the second field of a legitimate edit, because the first already moved the
+    // revision; the caller holds the lock throughout, so one check still means
+    // "nothing changed since I read it".
+    m.check_rev(id, edit.if_rev.as_deref())?;
+
+    if let Some(title) = &edit.title {
+        set_title(m, id, title.clone(), None)?;
+    }
+    if let Some(description) = &edit.description {
+        set_description(m, id, description.clone(), None)?;
+    }
+    if let Some(priority) = edit.priority {
+        set_priority(m, id, priority)?;
+    }
+    if let Some(parent) = &edit.parent {
+        match parent {
+            None => {
+                set_parent(m, id, None)?;
+            }
+            Some(reference) => {
+                let pid = m.store().resolve(reference)?;
+                set_parent(m, id, Some(&pid))?;
+            }
+        }
+    }
+    let mut labels = edit.labels.clone();
+    labels.extend(edit.remove_labels.iter().map(|l| format!("-{l}")));
+    edit_list(m, id, ListField::Labels, ListEdit::Deltas(&labels), None)
+}
+
+// ---------------------------------------------------------------------------
 // List-valued fields
 // ---------------------------------------------------------------------------
 

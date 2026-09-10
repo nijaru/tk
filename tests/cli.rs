@@ -1401,7 +1401,20 @@ fn cli_and_apply_produce_the_same_task() {
     // One way: a sequence of commands.
     ok_in(
         via_cli.path(),
-        &["edit", &a1, "-t", "renamed", "-l", "+x,+y", "-p", "1"],
+        &[
+            "edit",
+            &a1,
+            "-t",
+            "renamed",
+            "-l",
+            "+x,+y",
+            "-p",
+            "1",
+            "-d",
+            "a description",
+            "--parent",
+            &b1,
+        ],
     );
     ok_in(via_cli.path(), &["checkpoint", &a1, "halfway"]);
     ok_in(via_cli.path(), &["accept", &a1, "acc-one", "acc-two"]);
@@ -1413,7 +1426,8 @@ fn cli_and_apply_produce_the_same_task() {
 
     // The other: one batch of intents, same order.
     let body = serde_json::json!({"intents": [
-        {"op": "edit", "id": a2, "title": "renamed", "priority": 1, "labels": ["+x", "+y"]},
+        {"op": "edit", "id": a2, "title": "renamed", "priority": 1, "labels": ["+x", "+y"],
+         "desc": "a description", "parent": b2},
         {"op": "checkpoint", "id": a2, "text": "halfway"},
         {"op": "accept", "id": a2, "values": ["acc-one", "acc-two"]},
         {"op": "evidence", "id": a2, "values": ["cargo test"]},
@@ -1438,9 +1452,13 @@ fn cli_and_apply_produce_the_same_task() {
         "acceptance",
         "evidence",
         "links",
+        "description",
     ] {
         assert_eq!(one[field], two[field], "field {field} diverged");
     }
+    // The parent is a reference, so each store renders its own handle for beta.
+    assert_eq!(one["parent_ref"], serde_json::json!(b1));
+    assert_eq!(two["parent_ref"], serde_json::json!(b2));
     // Identity differs between the two stores (independent ULIDs and aliases),
     // so the graph is compared through each store's own handle for beta.
     assert_eq!(one["blocked_by"].as_array().map(Vec::len), Some(1));
