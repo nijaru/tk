@@ -1,7 +1,7 @@
 {
   "name": "@nijaru/tk",
   "version": "1.0.0",
-  "description": "Minimal task tracker: append-only JSON records in .tasks/",
+  "description": "Minimal task tracker: one JSON document per task in .tasks/",
   "homepage": "https://github.com/nijaru/tk",
   "repository": {
     "type": "git",
